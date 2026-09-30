@@ -51,19 +51,19 @@ While the window is hidden, the per-process and GPU sampling stops too.
 ## Install
 
 ```sh
-git clone https://github.com/design-nexus/nexus-tasks
-cd nexus-tasks
-./install.sh --bind
+curl -fsSL https://raw.githubusercontent.com/design-nexus/nexus-tasks/main/install.sh | bash
 ```
 
 This builds with Cargo and installs `tasks` to `~/.local/bin`, along with a launcher
-entry. `--bind` prints a binding to open it with Ctrl+Shift+Esc:
+entry. Add `-s -- --bind` after `bash` to also print a binding that opens it with
+Ctrl+Shift+Esc:
 
 ```lua
 o.bind("CTRL + SHIFT + Escape", "Task manager", hl.dsp.exec_cmd("tasks --toggle"))
 ```
 
-`./uninstall.sh` removes it. `--purge` also removes its settings and startup items.
+To remove it, run the same line with `uninstall.sh` in place of `install.sh`. Add
+`-s -- --purge` to also remove its settings and startup items.
 
 ## Usage
 
