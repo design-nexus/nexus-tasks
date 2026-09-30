@@ -1,0 +1,25 @@
+[Desktop Entry]
+Type=Application
+Name=Tasks
+GenericName=Task Manager
+Comment=Processes, live performance graphs, startup items and services
+Exec=tasks
+Icon=io.github.design_nexus.Tasks
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.github.design_nexus.Tasks
+Categories=System;Monitor;GTK;
+Keywords=task;manager;process;kill;cpu;memory;ram;gpu;disk;network;startup;autostart;services;systemd;monitor;
+Actions=processes;performance;startup;
+
+[Desktop Action processes]
+Name=Processes
+Exec=tasks --section processes
+
+[Desktop Action performance]
+Name=Performance
+Exec=tasks --section cpu
+
+[Desktop Action startup]
+Name=Startup Items
+Exec=tasks --section startup
