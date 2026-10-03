@@ -92,8 +92,9 @@ fn build(app: &gtk::Application) {
     // Labels inside expand; don't let that widen the sidebar itself.
     nav.set_hexpand(false);
     let heading = widgets::label("TASKS", "menu-heading");
+    heading.set_hexpand(true);
     let mut compact_hide: Vec<gtk::Widget> = vec![heading.clone().upcast()];
-    nav.append(&heading);
+    nav.append(&nav_head(&heading));
 
     let search = gtk::SearchEntry::new();
     search.set_placeholder_text(Some("Search pages"));
@@ -188,6 +189,10 @@ fn build(app: &gtk::Application) {
                 }
                 glib::Propagation::Stop
             }
+            gdk::Key::b if ctrl => {
+                toggle_sidebar();
+                glib::Propagation::Stop
+            }
             gdk::Key::q | gdk::Key::w if ctrl => {
                 w2.close();
                 glib::Propagation::Stop
@@ -208,24 +213,18 @@ fn build(app: &gtk::Application) {
     search.connect_activate(|_| focus_first_hit());
 
     // Narrow windows (a tiled half-screen) get an icon-only sidebar.
+    SIDEBAR.with(|s| *s.borrow_mut() = Some(Sidebar { nav: nav.clone(), hide: compact_hide }));
     let apply_width = {
         let nav = nav.clone();
         move |w: &gtk::ApplicationWindow| {
             let width = if w.width() > 0 { w.width() } else { w.default_width() };
-            let compact = width > 0 && width < 980;
-            if compact == nav.has_css_class("compact") && nav.has_css_class("sized") {
+            let narrow = width > 0 && width < 980;
+            if narrow == NARROW.with(|n| n.get()) && nav.has_css_class("sized") {
                 return;
             }
             nav.add_css_class("sized");
-            if compact {
-                nav.add_css_class("compact");
-            } else {
-                nav.remove_css_class("compact");
-            }
-            for wdg in &compact_hide {
-                wdg.set_visible(!compact);
-            }
-            set_narrow(compact);
+            set_narrow(narrow);
+            apply_compact(narrow || prefs::get().sidebar_collapsed);
         }
     };
     let aw = apply_width.clone();
@@ -249,8 +248,69 @@ fn build(app: &gtk::Application) {
     UI.with(|u| *u.borrow_mut() = Some(Rc::new(RefCell::new(ui))));
 }
 
+/// The parts of the sidebar that change when it collapses to icons.
+struct Sidebar {
+    nav: gtk::Box,
+    /// Hidden in the icon-only sidebar.
+    hide: Vec<gtk::Widget>,
+}
+
 thread_local! {
+    static SIDEBAR: RefCell<Option<Sidebar>> = const { RefCell::new(None) };
     static NARROW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The button that collapses the sidebar to icons, beside the app heading.
+fn nav_head(heading: &gtk::Label) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    row.add_css_class("nav-head");
+    row.append(heading);
+    let button = gtk::Button::from_icon_name("sidebar-show-symbolic");
+    button.add_css_class("nav-collapse");
+    button.set_tooltip_text(Some("Collapse or expand the sidebar (Ctrl+B)"));
+    button.set_valign(gtk::Align::Center);
+    button.connect_clicked(|_| toggle_sidebar());
+    row.append(&button);
+    row
+}
+
+/// The sidebar shows only icons: hide the labels, centre the icons and the toggle.
+fn apply_compact(compact: bool) {
+    SIDEBAR.with(|s| {
+        let s = s.borrow();
+        let Some(s) = s.as_ref() else { return };
+        if compact {
+            s.nav.add_css_class("compact");
+        } else {
+            s.nav.remove_css_class("compact");
+        }
+        for w in &s.hide {
+            w.set_visible(!compact);
+        }
+        centre_icons(s.nav.upcast_ref(), compact);
+    });
+}
+
+fn centre_icons(w: &gtk::Widget, compact: bool) {
+    if w.has_css_class("nav-item")
+        && let Some(content) = w.downcast_ref::<gtk::Button>().and_then(|b| b.child())
+    {
+        content.set_halign(if compact { gtk::Align::Center } else { gtk::Align::Fill });
+    }
+    if w.has_css_class("nav-collapse") {
+        w.set_halign(if compact { gtk::Align::Center } else { gtk::Align::End });
+        w.set_hexpand(compact);
+    }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        centre_icons(&c, compact);
+        child = c.next_sibling();
+    }
+}
+
+pub fn toggle_sidebar() {
+    prefs::update(|p| p.sidebar_collapsed = !p.sidebar_collapsed);
+    apply_compact(NARROW.with(|n| n.get()) || prefs::get().sidebar_collapsed);
 }
 
 fn set_narrow(narrow: bool) {

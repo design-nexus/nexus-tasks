@@ -19,6 +19,8 @@ pub struct Prefs {
     pub mode: ThemeMode,
     pub theme: String,
     pub reduce_motion: bool,
+    /// The sidebar shows only icons, whatever the window width.
+    pub sidebar_collapsed: bool,
     pub glow: bool,
     pub last_section: String,
     /// How often to sample, in milliseconds.
@@ -47,6 +49,7 @@ impl Default for Prefs {
             mode: ThemeMode::Omarchy,
             theme: "tokyo-night".into(),
             reduce_motion: false,
+            sidebar_collapsed: false,
             glow: true,
             last_section: "overview".into(),
             interval_ms: 1000,
