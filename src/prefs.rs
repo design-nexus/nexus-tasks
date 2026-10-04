@@ -22,7 +22,6 @@ pub struct Prefs {
     /// The sidebar shows only icons, whatever the window width.
     pub sidebar_collapsed: bool,
     pub glow: bool,
-    pub last_section: String,
     /// How often to sample, in milliseconds.
     pub interval_ms: u64,
     /// How much history the graphs keep, in seconds.
@@ -84,7 +83,6 @@ impl Default for Prefs {
             reduce_motion: false,
             sidebar_collapsed: false,
             glow: true,
-            last_section: "overview".into(),
             interval_ms: 1000,
             history_secs: 60,
             net_bits: false,

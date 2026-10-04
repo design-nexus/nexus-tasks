@@ -45,8 +45,7 @@ pub fn present(app: &gtk::Application, section: Option<&str>) {
     live::start();
     crate::alerts::start();
     build(app);
-    let start = section.map(String::from).unwrap_or_else(|| prefs::get().last_section);
-    navigate(&start);
+    navigate(section.unwrap_or("overview"));
     // Developer aid: TASKS_SNAPSHOT=/path.png renders the window to a PNG
     // (invisibly) and quits, so layouts can be checked without a visible window.
     if let Some(out) = std::env::var_os("TASKS_SNAPSHOT") {
@@ -390,8 +389,6 @@ pub fn navigate(id: &str) {
     }
     u.stack.set_visible_child_name(id);
     u.current = id;
-    drop(u);
-    prefs::update(|p| p.last_section = id.to_string());
 }
 
 /// Rebuild a section page from scratch (after a change that alters its layout).
