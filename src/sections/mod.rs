@@ -54,7 +54,7 @@ pub fn all() -> Vec<Section> {
             title: "Processes",
             icon: "utilities-system-monitor-symbolic",
             group: "Monitor",
-            description: "Every running program. End, pause or reprioritise any of them.",
+            description: "Every running program. End, pause or reprioritize any of them.",
             keywords: "tasks apps kill end terminate stop signal nice priority pid tree",
             files: Vec::new,
             build: processes::build,

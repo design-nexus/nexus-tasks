@@ -1,7 +1,12 @@
 # Tasks — notes for working on this repo
 
-- GTK4 (gtk4-rs 0.11) + Rust. No libadwaita. Follows `~/Projects/STYLE.md`; theme,
-  window, widgets and stylesheet started as copies of Settings (`~/Projects/settings`).
+- GTK4 (gtk4-rs 0.11) + Rust. No libadwaita. The window is one flat, monospace surface
+  split by hairlines: a top bar (sidebar toggle, `Tasks / <page>`, the page's config
+  file, search, settings, close), the sidebar, the page and a status bar (`F1 Shortcuts`,
+  processes/CPU/memory, the live/paused pill). Pages have no title header. Settings
+  is a card over the window (`settings_dialog.rs`) listing the settings page's groups;
+  `navigate("settings")` opens it. Ctrl+F filters processes, or opens Go to elsewhere.
+  Theme, window, widgets and stylesheet started as copies of Settings (`~/Projects/settings`).
   Every colour is a `@theme_*` token; graphs get theirs from `theme::palette()`.
 - `sampler/` runs on its own thread and never touches GTK. It sends a `Snapshot` per
   interval over an async channel. `live.rs` keeps graph history (ring buffers by key,

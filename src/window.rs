@@ -1,9 +1,11 @@
-//! The main window: navigation sidebar with search, and a stack of
-//! section pages that are built the first time they're shown.
+//! The main window: a top bar (sidebar toggle, where you are, search,
+//! settings, close), the navigation sidebar, a stack of section pages built the
+//! first time they're shown, and a status bar. Settings opens as a dialog over
+//! the window (see `settings_dialog`).
 
 use crate::sections::{self, Section};
-use crate::widgets::{self, SEARCH};
-use crate::{live, prefs, theme};
+use crate::widgets;
+use crate::{fmt, live, prefs, settings_dialog, theme};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use std::cell::RefCell;
@@ -14,13 +16,17 @@ struct Ui {
     window: gtk::ApplicationWindow,
     stack: gtk::Stack,
     nav_items: HashMap<&'static str, gtk::Button>,
-    nav_groups: Vec<(gtk::Label, Vec<&'static str>)>,
     pages: HashMap<&'static str, gtk::ScrolledWindow>,
     sections: Vec<Section>,
     current: &'static str,
     /// The one toast, reused so quick messages replace each other.
     toast: gtk::Label,
     toast_timer: Option<glib::SourceId>,
+    overlay: gtk::Overlay,
+    /// The current page's name, in the top bar.
+    crumb: gtk::Label,
+    /// Holds the current page's "open the config file" button.
+    edit: gtk::Box,
 }
 
 thread_local! {
@@ -93,27 +99,20 @@ fn build(app: &gtk::Application) {
     nav.add_css_class("settings-navigation");
     // Labels inside expand; don't let that widen the sidebar itself.
     nav.set_hexpand(false);
-    let heading = widgets::label("TASKS", "menu-heading");
-    heading.set_hexpand(true);
-    let mut compact_hide: Vec<gtk::Widget> = vec![heading.clone().upcast()];
-    nav.append(&nav_head(&heading));
-
-    let search = gtk::SearchEntry::new();
-    search.set_placeholder_text(Some("Search pages"));
-    search.add_css_class("settings-search");
-    nav.append(&search);
-    compact_hide.push(search.clone().upcast());
+    let mut compact_hide: Vec<gtk::Widget> = Vec::new();
 
     let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let mut nav_items = HashMap::new();
-    let mut nav_groups: Vec<(gtk::Label, Vec<&'static str>)> = Vec::new();
     let mut last_group = "";
-    for s in &sections {
+    // Settings opens as a dialog from the top bar, so it has no nav item.
+    for s in sections.iter().filter(|s| s.id != "settings") {
         if s.group != last_group {
             let g = widgets::label(&s.group.to_uppercase(), "nav-group");
+            if last_group.is_empty() {
+                g.add_css_class("first");
+            }
             compact_hide.push(g.clone().upcast());
             list.append(&g);
-            nav_groups.push((g, Vec::new()));
             last_group = s.group;
         }
         let button = gtk::Button::new();
@@ -141,9 +140,6 @@ fn build(app: &gtk::Application) {
         button.connect_clicked(move |_| navigate(id));
         list.append(&button);
         nav_items.insert(s.id, button);
-        if let Some(g) = nav_groups.last_mut() {
-            g.1.push(s.id);
-        }
     }
     let nav_scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -154,16 +150,6 @@ fn build(app: &gtk::Application) {
         .build();
     nav.append(&nav_scroll);
 
-    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    footer.add_css_class("nav-footer");
-    let version = widgets::label(concat!("Tasks ", env!("CARGO_PKG_VERSION")), "dim");
-    version.set_hexpand(true);
-    footer.append(&version);
-    let pause = pause_button();
-    footer.append(&pause);
-    nav.append(&footer);
-    compact_hide.push(footer.clone().upcast());
-
     // ----- Content -----
     let stack = gtk::Stack::new();
     stack.add_css_class("settings-content");
@@ -172,11 +158,19 @@ fn build(app: &gtk::Application) {
     stack.set_transition_duration(if prefs::get().reduce_motion { 0 } else { 160 });
 
     let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    body.set_vexpand(true);
     body.append(&nav);
     body.append(&stack);
 
+    let (top, crumb, edit) = top_bar(&window);
+    let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    frame.add_css_class("window-frame");
+    frame.append(&top);
+    frame.append(&body);
+    frame.append(&status_bar());
+
     let overlay = gtk::Overlay::new();
-    overlay.set_child(Some(&body));
+    overlay.set_child(Some(&frame));
     window.set_child(Some(&overlay));
     let toast = gtk::Label::new(None);
     toast.set_wrap(true);
@@ -192,17 +186,33 @@ fn build(app: &gtk::Application) {
 
     // ----- Keys -----
     let keys = gtk::EventControllerKey::new();
-    let s2 = search.clone();
     let w2 = window.clone();
     keys.connect_key_pressed(move |_, key, _, mods| {
         let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
+        if settings_dialog::is_open() {
+            return match key {
+                gdk::Key::Escape => {
+                    settings_dialog::escape();
+                    glib::Propagation::Stop
+                }
+                gdk::Key::f if ctrl => {
+                    settings_dialog::focus_search();
+                    glib::Propagation::Stop
+                }
+                gdk::Key::q | gdk::Key::w if ctrl => {
+                    w2.close();
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            };
+        }
         match key {
             gdk::Key::f if ctrl => {
-                if current() == "processes" {
-                    crate::sections::processes::focus_search();
-                } else {
-                    s2.grab_focus();
-                }
+                find();
+                glib::Propagation::Stop
+            }
+            gdk::Key::F1 => {
+                show_shortcuts();
                 glib::Propagation::Stop
             }
             gdk::Key::k if ctrl => {
@@ -217,10 +227,6 @@ fn build(app: &gtk::Application) {
                 w2.close();
                 glib::Propagation::Stop
             }
-            gdk::Key::Escape if !s2.text().is_empty() => {
-                s2.set_text("");
-                glib::Propagation::Stop
-            }
             gdk::Key::p if ctrl => {
                 toggle_pause();
                 glib::Propagation::Stop
@@ -229,8 +235,6 @@ fn build(app: &gtk::Application) {
         }
     });
     window.add_controller(keys);
-    search.connect_search_changed(|e| filter(&e.text()));
-    search.connect_activate(|_| focus_first_hit());
 
     // Narrow windows (a tiled half-screen) get an icon-only sidebar.
     SIDEBAR.with(|s| *s.borrow_mut() = Some(Sidebar { nav: nav.clone(), hide: compact_hide }));
@@ -239,6 +243,7 @@ fn build(app: &gtk::Application) {
         move |w: &gtk::ApplicationWindow| {
             let width = if w.width() > 0 { w.width() } else { w.default_width() };
             let narrow = width > 0 && width < 980;
+            settings_dialog::fit(w);
             if narrow == NARROW.with(|n| n.get()) && nav.has_css_class("sized") {
                 return;
             }
@@ -255,6 +260,10 @@ fn build(app: &gtk::Application) {
     let w2 = window.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(400), move || {
         apply_width(&w2);
+        // Pages fill in as readings arrive; keep their first heading tucked up.
+        if let Some(page) = ui().and_then(|u| u.borrow().pages.get(u.borrow().current).cloned()) {
+            mark_first_heading(page.upcast_ref());
+        }
         glib::ControlFlow::Continue
     });
 
@@ -264,7 +273,19 @@ fn build(app: &gtk::Application) {
         live::set_detail(!(w.is_suspended() && prefs::get().pause_hidden));
     });
 
-    let ui = Ui { window, stack, nav_items, nav_groups, pages: HashMap::new(), sections, current: "", toast, toast_timer: None };
+    let ui = Ui {
+        window,
+        stack,
+        nav_items,
+        pages: HashMap::new(),
+        sections,
+        current: "",
+        toast,
+        toast_timer: None,
+        overlay,
+        crumb,
+        edit,
+    };
     UI.with(|u| *u.borrow_mut() = Some(Rc::new(RefCell::new(ui))));
 }
 
@@ -280,18 +301,130 @@ thread_local! {
     static NARROW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// The button that collapses the sidebar to icons, beside the app heading.
-fn nav_head(heading: &gtk::Label) -> gtk::Box {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    row.add_css_class("nav-head");
-    row.append(heading);
-    let button = gtk::Button::from_icon_name("sidebar-show-symbolic");
-    button.add_css_class("nav-collapse");
-    button.set_tooltip_text(Some("Collapse or expand the sidebar (Ctrl+B)"));
-    button.set_valign(gtk::Align::Center);
-    button.connect_clicked(|_| toggle_sidebar());
-    row.append(&button);
-    row
+/// The bar across the top: the sidebar toggle and where you are on the left;
+/// the page's config file, search, settings and close on the right.
+fn top_bar(window: &gtk::ApplicationWindow) -> (gtk::Box, gtk::Label, gtk::Box) {
+    let bar = widgets::hbox(4);
+    bar.add_css_class("top-bar");
+    let toggle = widgets::bar_button("sidebar-show-symbolic", "Collapse or expand the sidebar (Ctrl+B)");
+    toggle.connect_clicked(|_| toggle_sidebar());
+    bar.append(&toggle);
+    let crumbs = widgets::hbox(10);
+    crumbs.add_css_class("crumbs");
+    crumbs.append(&widgets::label("Tasks", "crumb-root"));
+    crumbs.append(&widgets::label("/", "crumb-sep"));
+    let crumb = widgets::label("", "crumb");
+    crumb.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    crumbs.append(&crumb);
+    crumbs.set_hexpand(true);
+    bar.append(&crumbs);
+    let edit = widgets::hbox(0);
+    bar.append(&edit);
+    let search = widgets::bar_button("system-search-symbolic", "Filter processes, or go to anything (Ctrl+F)");
+    search.connect_clicked(|_| find());
+    bar.append(&search);
+    let gear = widgets::bar_button("emblem-system-symbolic", "Settings");
+    gear.connect_clicked(|_| settings_dialog::open());
+    bar.append(&gear);
+    let close = widgets::bar_button("window-close-symbolic", "Close (Ctrl+W)");
+    let w = window.clone();
+    close.connect_clicked(move |_| w.close());
+    bar.append(&close);
+    (bar, crumb, edit)
+}
+
+/// Ctrl+F: filter the process list on Processes; anywhere else, Go to.
+fn find() {
+    if current() == "processes" {
+        crate::sections::processes::focus_search();
+    } else {
+        crate::palette::open();
+    }
+}
+
+/// The bar along the bottom: the shortcuts on the left; processes, CPU and
+/// memory, and the live/paused switch on the right.
+fn status_bar() -> gtk::Box {
+    let bar = widgets::hbox(16);
+    bar.add_css_class("status-bar");
+    let help = gtk::Button::new();
+    help.add_css_class("status-help");
+    let content = widgets::hbox(10);
+    content.append(&widgets::label("F1", "status-key"));
+    content.append(&widgets::label("Shortcuts", ""));
+    help.set_child(Some(&content));
+    help.set_tooltip_text(Some("Show the keyboard shortcuts"));
+    help.connect_clicked(|_| show_shortcuts());
+    bar.append(&help);
+    let spacer = widgets::hbox(0);
+    spacer.set_hexpand(true);
+    bar.append(&spacer);
+    let readout = widgets::label("", "status-readout");
+    readout.set_ellipsize(gtk::pango::EllipsizeMode::Start);
+    bar.append(&readout);
+    bar.append(&pause_button());
+    let r = readout.clone();
+    live::on_tick(&readout, move |snap| {
+        let mut parts = Vec::new();
+        if snap.process_count > 0 {
+            parts.push(format!("{} processes", snap.process_count));
+        }
+        parts.push(format!("CPU {}", fmt::pct(snap.cpu.usage)));
+        if snap.mem.total > 0 {
+            parts.push(format!("Memory {}", fmt::pct(snap.mem.used as f64 / snap.mem.total as f64 * 100.0)));
+        }
+        r.set_text(&parts.join(" · "));
+    });
+    bar
+}
+
+/// Every keyboard shortcut, for the shortcuts dialog and Settings.
+pub const SHORTCUTS: &[(&[&str], &str)] = &[
+    (&["Ctrl", "K"], "Go to a page, process, service or startup item"),
+    (&["Ctrl", "F"], "Filter processes on the Processes page, or go to anything"),
+    (&["/"], "Filter processes (from the process list)"),
+    (&["Ctrl", "P"], "Pause or resume updates"),
+    (&["Ctrl", "B"], "Collapse or expand the sidebar"),
+    (&["Enter"], "Open a group, or switch to the process's window"),
+    (&["← / →"], "Close or open a branch in Apps and Tree"),
+    (&["Delete"], "End the selected processes"),
+    (&["Shift", "Delete"], "Kill the selected processes"),
+    (&["Right-click"], "Actions for a process, or export a graph"),
+    (&["Esc"], "Clear the search"),
+    (&["F1"], "Show these shortcuts"),
+    (&["Ctrl", "W"], "Close (Ctrl+Q too)"),
+];
+
+pub fn key_caps(keys: &[&str]) -> gtk::Box {
+    let caps = widgets::hbox(4);
+    for (i, k) in keys.iter().enumerate() {
+        if i > 0 {
+            caps.append(&widgets::label("+", "dim"));
+        }
+        caps.append(&widgets::label(k, "key-cap"));
+    }
+    caps
+}
+
+pub fn show_shortcuts() {
+    let (dialog, card) = widgets::dialog("Keyboard shortcuts", 520);
+    let list = widgets::vbox(0);
+    list.add_css_class("group-list");
+    for (keys, what) in SHORTCUTS {
+        list.append(&widgets::row(what, "", Some(key_caps(keys).upcast_ref())));
+    }
+    card.append(&list);
+    let close = gtk::Button::with_label("Close");
+    close.set_halign(gtk::Align::End);
+    let d = dialog.clone();
+    close.connect_clicked(move |_| d.close());
+    card.append(&close);
+    dialog.present();
+}
+
+/// The layer over the window, for the settings dialog.
+pub fn overlay() -> Option<gtk::Overlay> {
+    ui().map(|u| u.borrow().overlay.clone())
 }
 
 /// The sidebar shows only icons: hide the labels, centre the icons and the toggle.
@@ -316,10 +449,6 @@ fn centre_icons(w: &gtk::Widget, compact: bool) {
         && let Some(content) = w.downcast_ref::<gtk::Button>().and_then(|b| b.child())
     {
         content.set_halign(if compact { gtk::Align::Center } else { gtk::Align::Fill });
-    }
-    if w.has_css_class("nav-collapse") {
-        w.set_halign(if compact { gtk::Align::Center } else { gtk::Align::End });
-        w.set_hexpand(compact);
     }
     let mut child = w.first_child();
     while let Some(c) = child {
@@ -358,22 +487,82 @@ fn ensure_built(id: &'static str) {
     }
     let section = {
         let u = ui.borrow();
-        u.sections.iter().find(|s| s.id == id).map(|s| (s.id, s.title, s.description, (s.files)(), s.build, s.fill))
+        u.sections.iter().find(|s| s.id == id).map(|s| (s.id, s.build, s.fill))
     };
-    let Some((sid, title, description, files, build, fill)) = section else { return };
-    let page = widgets::page(sid, title, description, &files);
+    let Some((sid, build, fill)) = section else { return };
+    let page = widgets::page(sid);
     if fill {
         page.fill();
     }
     build(&page);
     mark_page(&page.root, NARROW.with(|n| n.get()));
+    // Some pages add their content once the first readings arrive, so the
+    // heading to tuck under the top edge is found each time the page shows.
+    page.root.connect_map(|root| {
+        mark_first_heading(root.upcast_ref());
+        let root = root.clone();
+        glib::idle_add_local_once(move || mark_first_heading(root.upcast_ref()));
+    });
     let stack = ui.borrow().stack.clone();
     stack.add_named(&page.root, Some(sid));
     ui.borrow_mut().pages.insert(sid, page.root);
 }
 
+/// Give a page's first heading the `page-first` class (no space above it, so
+/// the gap to the top edge matches the gap below it), unless something else
+/// comes before it.
+fn mark_first_heading(root: &gtk::Widget) {
+    const CONTENT: &[&str] = &["graph-card", "group-list", "settings-card", "settings-option", "banner", "table-card", "toolbar"];
+    // The first heading, unless content comes before it.
+    fn target(w: &gtk::Widget) -> Option<Option<gtk::Widget>> {
+        if !w.is_visible() {
+            return None;
+        }
+        if w.has_css_class("group-title") || w.has_css_class("group-head") {
+            return Some(Some(w.clone()));
+        }
+        if CONTENT.iter().any(|c| w.has_css_class(c)) {
+            return Some(None);
+        }
+        let mut c = w.first_child();
+        while let Some(x) = c {
+            if let Some(found) = target(&x) {
+                return Some(found);
+            }
+            c = x.next_sibling();
+        }
+        None
+    }
+    // Only touch classes that change, so a check that finds nothing new costs no restyle.
+    fn apply(w: &gtk::Widget, first: Option<&gtk::Widget>) {
+        let is = first == Some(w);
+        if is != w.has_css_class("page-first") {
+            if is {
+                w.add_css_class("page-first");
+            } else {
+                w.remove_css_class("page-first");
+            }
+        }
+        let mut c = w.first_child();
+        while let Some(x) = c {
+            apply(&x, first);
+            c = x.next_sibling();
+        }
+    }
+    let first = target(root).flatten();
+    apply(root, first.as_ref());
+}
+
 pub fn navigate(id: &str) {
     let Some(ui) = ui() else { return };
+    // Settings is a dialog over the window, not a page.
+    if id == "settings" {
+        settings_dialog::open();
+        if !ui.borrow().current.is_empty() {
+            return;
+        }
+    }
+    let id = if id == "settings" { "overview" } else { id };
     let resolved = {
         let u = ui.borrow();
         u.sections.iter().find(|s| s.id == id).or_else(|| u.sections.first()).map(|s| s.id)
@@ -389,6 +578,16 @@ pub fn navigate(id: &str) {
     }
     u.stack.set_visible_child_name(id);
     u.current = id;
+    if let Some(s) = u.sections.iter().find(|s| s.id == id) {
+        u.crumb.set_text(s.title);
+        while let Some(c) = u.edit.first_child() {
+            u.edit.remove(&c);
+        }
+        let files = (s.files)();
+        if !files.is_empty() {
+            u.edit.append(&widgets::config_button(&files));
+        }
+    }
 }
 
 /// Rebuild a section page from scratch (after a change that alters its layout).
@@ -396,124 +595,12 @@ pub fn rebuild(id: &'static str) {
     let Some(ui) = ui() else { return };
     let old = ui.borrow_mut().pages.remove(id);
     if let Some(old) = old {
-        SEARCH.with(|s| s.borrow_mut().retain(|item| item.section != id));
         ui.borrow().stack.remove(&old);
     }
     let current = ui.borrow().current;
     ensure_built(id);
     if current == id {
         ui.borrow().stack.set_visible_child_name(id);
-    }
-}
-
-fn filter(query: &str) {
-    let Some(ui) = ui() else { return };
-    let q = query.trim().to_lowercase();
-    let terms: Vec<&str> = q.split_whitespace().collect();
-
-    if !terms.is_empty() {
-        let ids: Vec<&'static str> = ui.borrow().sections.iter().map(|s| s.id).collect();
-        for id in ids {
-            ensure_built(id);
-        }
-    }
-
-    let mut section_hits: HashMap<String, usize> = HashMap::new();
-    let title_hits: Vec<&'static str> = {
-        let u = ui.borrow();
-        u.sections
-            .iter()
-            .filter(|s| {
-                let hay = format!("{} {} {}", s.title, s.description, s.keywords).to_lowercase();
-                !terms.is_empty() && terms.iter().all(|t| hay.contains(t))
-            })
-            .map(|s| s.id)
-            .collect()
-    };
-
-    SEARCH.with(|s| {
-        let items = s.borrow();
-        let mut groups_visible: HashMap<gtk::Widget, bool> = HashMap::new();
-        for item in items.iter() {
-            item.row.remove_css_class("search-hit");
-            let hit = !terms.is_empty() && terms.iter().all(|t| item.text.contains(t));
-            let whole_section = title_hits.iter().any(|id| *id == item.section);
-            let show = terms.is_empty() || hit || whole_section;
-            item.row.set_visible(show);
-            if hit {
-                *section_hits.entry(item.section.clone()).or_default() += 1;
-            }
-            if let Some(g) = &item.group {
-                let e = groups_visible.entry(g.clone()).or_insert(false);
-                *e |= show;
-            }
-        }
-        for (g, visible) in groups_visible {
-            g.set_visible(visible);
-        }
-    });
-
-    let u = ui.borrow();
-    let mut first_match: Option<&'static str> = None;
-    for s in &u.sections {
-        let Some(button) = u.nav_items.get(s.id) else { continue };
-        let visible = terms.is_empty() || section_hits.contains_key(s.id) || title_hits.contains(&s.id);
-        button.set_visible(visible);
-        if visible && first_match.is_none() && !terms.is_empty() {
-            first_match = Some(s.id);
-        }
-    }
-    for (label, ids) in &u.nav_groups {
-        label.set_visible(ids.iter().any(|id| u.nav_items.get(id).is_some_and(|b| b.is_visible())));
-    }
-    let current = u.current;
-    let current_visible = u.nav_items.get(current).is_some_and(|b| b.is_visible());
-    drop(u);
-    if let Some(first) = first_match
-        && (!current_visible || !section_hits.contains_key(current))
-    {
-        navigate(first);
-    }
-    highlight_first_hit(&terms);
-}
-
-fn highlight_first_hit(terms: &[&str]) {
-    if terms.is_empty() {
-        return;
-    }
-    let Some(ui) = ui() else { return };
-    let current = ui.borrow().current;
-    let row = SEARCH.with(|s| {
-        s.borrow().iter().find(|i| i.section == current && terms.iter().all(|t| i.text.contains(t))).map(|i| i.row.clone())
-    });
-    if let Some(row) = row {
-        row.add_css_class("search-hit");
-        scroll_to(&row);
-    }
-}
-
-fn scroll_to(row: &gtk::Widget) {
-    let Some(ui) = ui() else { return };
-    let current = ui.borrow().current;
-    let Some(page) = ui.borrow().pages.get(current).cloned() else { return };
-    let row = row.clone();
-    glib::idle_add_local_once(move || {
-        if let Some(child) = page.child()
-            && let Some(p) = row.compute_point(&child, &gtk::graphene::Point::new(0.0, 0.0))
-        {
-            let adj = page.vadjustment();
-            adj.set_value((p.y() as f64 - 80.0).max(0.0));
-        }
-    });
-}
-
-fn focus_first_hit() {
-    let Some(ui) = ui() else { return };
-    let current = ui.borrow().current;
-    let row = SEARCH
-        .with(|s| s.borrow().iter().find(|i| i.section == current && i.row.has_css_class("search-hit")).map(|i| i.row.clone()));
-    if let Some(row) = row {
-        row.child_focus(gtk::DirectionType::TabForward);
     }
 }
 
@@ -553,7 +640,7 @@ thread_local! {
     static PAUSE_BUTTONS: RefCell<Vec<gtk::Button>> = const { RefCell::new(Vec::new()) };
 }
 
-/// The live/paused pill in the sidebar footer.
+/// The live/paused pill in the status bar.
 fn pause_button() -> gtk::Button {
     let b = gtk::Button::new();
     b.add_css_class("chip");

@@ -1,6 +1,6 @@
 # Tasks
 
-A task manager for [Omarchy](https://omarchy.org). It takes its colours from your
+A task manager for [Omarchy](https://omarchy.org). It takes its colors from your
 Omarchy theme and fits a half-screen tile.
 
 ## What it does
@@ -52,7 +52,7 @@ Omarchy theme and fits a half-screen tile.
 
 Graphs keep 1, 5 or 10 minutes of history and update every 0.5–5 s. Hover any graph
 to read past values, and right-click one to export it as CSV (Settings exports them
-all). <kbd>Ctrl</kbd>+<kbd>P</kbd> pauses updates.
+all). <kbd>Ctrl</kbd>+<kbd>P</kbd> pauses updates, and <kbd>F1</kbd> lists every shortcut.
 
 ### Easy on the battery
 

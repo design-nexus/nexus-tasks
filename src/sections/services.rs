@@ -634,8 +634,9 @@ fn show_logs(unit: &str, user: bool) {
 
 pub fn build(page: &Page) {
     let p = prefs::get();
-    let toolbar = widgets::vbox(8);
+    let toolbar = widgets::vbox(10);
     toolbar.add_css_class("toolbar");
+    toolbar.add_css_class("stacked");
     let chips = gtk::FlowBox::new();
     chips.set_selection_mode(gtk::SelectionMode::None);
     chips.set_column_spacing(14);
@@ -772,7 +773,7 @@ pub fn build(page: &Page) {
             reset(&s);
         }) as Rc<dyn Fn()>
     };
-    chip_group(&scope_box, vec![("Yours", scope(true)), ("System", scope(false))], (!st.user.get()) as usize);
+    chip_group(&scope_box, vec![("User", scope(true)), ("System", scope(false))], (!st.user.get()) as usize);
     let mk = |show: Show| {
         let s = st.clone();
         Rc::new(move || {

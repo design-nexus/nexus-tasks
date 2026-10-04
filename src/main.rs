@@ -12,6 +12,7 @@ mod paths;
 mod prefs;
 mod sampler;
 mod sections;
+mod settings_dialog;
 mod startup;
 mod theme;
 mod widgets;

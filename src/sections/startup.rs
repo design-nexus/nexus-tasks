@@ -138,7 +138,6 @@ fn fill(body: &gtk::Box, d: Data) {
     let slow: f64 = d.blame.values().sum();
     let summary = widgets::vbox(0);
     summary.add_css_class("graph-card");
-    summary.set_margin_top(14);
     let (flow, v) = widgets::kv_flow(&["Hyprland", "Apps", "User services", "Start time (services)"]);
     v[0].set_text(&(d.user.len() + d.omarchy.len() + managed_on).to_string());
     v[1].set_text(&enabled_xdg.to_string());

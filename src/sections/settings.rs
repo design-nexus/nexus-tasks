@@ -28,7 +28,7 @@ pub fn build(page: &Page) {
         let dd = theme_dd.clone();
         let (r, _) = widgets::switch_row(
             "Follow Omarchy theme",
-            "Match the desktop's colours and update live whenever the Omarchy theme changes.",
+            "Match the desktop's colors and update live whenever the Omarchy theme changes.",
             p.mode == prefs::ThemeMode::Omarchy,
             move |on| {
                 prefs::update(|p| p.mode = if on { prefs::ThemeMode::Omarchy } else { prefs::ThemeMode::Theme });
@@ -73,7 +73,7 @@ pub fn build(page: &Page) {
         }
         glib::ControlFlow::Continue
     });
-    g.add(&widgets::row("Current colours", "", Some(swatches.upcast_ref())));
+    g.add(&widgets::row("Current colors", "", Some(swatches.upcast_ref())));
 
     let (r, _) = widgets::switch_row("Glow", "Soft accent glow around focused and selected elements.", p.glow, |on| {
         prefs::update(|p| p.glow = on);
@@ -232,28 +232,8 @@ pub fn build(page: &Page) {
 
     // ----- Keyboard -----
     let g = page.group("Keyboard");
-    for (keys, what) in [
-        (&["Ctrl", "K"][..], "Go to a page, process, service or startup item"),
-        (&["Ctrl", "F"][..], "Search pages, or filter processes on the Processes page"),
-        (&["/"][..], "Filter processes (from the process list)"),
-        (&["Ctrl", "P"][..], "Pause or resume updates"),
-        (&["Ctrl", "B"][..], "Collapse or expand the sidebar"),
-        (&["Enter"][..], "Open a group, or switch to the process's window"),
-        (&["← / →"][..], "Close or open a branch in Apps and Tree"),
-        (&["Delete"][..], "End the selected processes"),
-        (&["Shift", "Delete"][..], "Kill the selected processes"),
-        (&["Right-click"][..], "Actions for a process, or export a graph"),
-        (&["Esc"][..], "Clear the search"),
-        (&["Ctrl", "W"][..], "Close (Ctrl+Q too)"),
-    ] {
-        let caps = widgets::hbox(4);
-        for (i, k) in keys.iter().enumerate() {
-            if i > 0 {
-                caps.append(&widgets::label("+", "dim"));
-            }
-            caps.append(&widgets::label(k, "key-cap"));
-        }
-        g.add(&widgets::row(what, "", Some(caps.upcast_ref())));
+    for (keys, what) in crate::window::SHORTCUTS {
+        g.add(&widgets::row(what, "", Some(crate::window::key_caps(keys).upcast_ref())));
     }
     g.note("To open Tasks with a key, bind <tt>tasks --toggle</tt> in <tt>~/.config/hypr/bindings.lua</tt>, for example Ctrl+Shift+Esc.");
 }
