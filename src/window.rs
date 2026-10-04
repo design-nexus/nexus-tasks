@@ -18,7 +18,9 @@ struct Ui {
     pages: HashMap<&'static str, gtk::ScrolledWindow>,
     sections: Vec<Section>,
     current: &'static str,
-    overlay: gtk::Overlay,
+    /// The one toast, reused so quick messages replace each other.
+    toast: gtk::Label,
+    toast_timer: Option<glib::SourceId>,
 }
 
 thread_local! {
@@ -41,6 +43,7 @@ pub fn present(app: &gtk::Application, section: Option<&str>) {
     theme::install();
     install_icons();
     live::start();
+    crate::alerts::start();
     build(app);
     let start = section.map(String::from).unwrap_or_else(|| prefs::get().last_section);
     navigate(&start);
@@ -125,6 +128,9 @@ fn build(app: &gtk::Application) {
         if let Some(readout) = s.readout {
             let r = widgets::label("", "nav-readout");
             r.add_css_class("mono");
+            // A long reading ("↓ 12.3 MiB/s") mustn't widen the sidebar.
+            r.set_max_width_chars(11);
+            r.set_ellipsize(gtk::pango::EllipsizeMode::End);
             compact_hide.push(r.clone().upcast());
             content.append(&r);
             let r2 = r.clone();
@@ -173,6 +179,17 @@ fn build(app: &gtk::Application) {
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&body));
     window.set_child(Some(&overlay));
+    let toast = gtk::Label::new(None);
+    toast.set_wrap(true);
+    toast.set_max_width_chars(70);
+    let toast_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    toast_box.add_css_class("toast");
+    toast_box.append(&toast);
+    toast_box.set_halign(gtk::Align::Center);
+    toast_box.set_valign(gtk::Align::End);
+    toast_box.set_can_target(false);
+    toast_box.set_visible(false);
+    overlay.add_overlay(&toast_box);
 
     // ----- Keys -----
     let keys = gtk::EventControllerKey::new();
@@ -187,6 +204,10 @@ fn build(app: &gtk::Application) {
                 } else {
                     s2.grab_focus();
                 }
+                glib::Propagation::Stop
+            }
+            gdk::Key::k if ctrl => {
+                crate::palette::open();
                 glib::Propagation::Stop
             }
             gdk::Key::b if ctrl => {
@@ -244,7 +265,7 @@ fn build(app: &gtk::Application) {
         live::set_detail(!(w.is_suspended() && prefs::get().pause_hidden));
     });
 
-    let ui = Ui { window, stack, nav_items, nav_groups, pages: HashMap::new(), sections, current: "", overlay };
+    let ui = Ui { window, stack, nav_items, nav_groups, pages: HashMap::new(), sections, current: "", toast, toast_timer: None };
     UI.with(|u| *u.borrow_mut() = Some(Rc::new(RefCell::new(ui))));
 }
 
@@ -499,25 +520,32 @@ fn focus_first_hit() {
     }
 }
 
-/// Show a short message at the bottom of the window.
+/// Show a short message at the bottom of the window. A newer message replaces
+/// the one showing and restarts its timer.
 pub fn toast(message: &str) {
     let Some(ui) = ui() else {
         eprintln!("tasks: {message}");
         return;
     };
-    let overlay = ui.borrow().overlay.clone();
-    let label = gtk::Label::new(Some(message));
-    label.set_wrap(true);
-    label.set_max_width_chars(70);
-    let bx = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    bx.add_css_class("toast");
-    bx.append(&label);
-    bx.set_halign(gtk::Align::Center);
-    bx.set_valign(gtk::Align::End);
-    overlay.add_overlay(&bx);
-    glib::timeout_add_local_once(std::time::Duration::from_millis(3500), move || {
-        overlay.remove_overlay(&bx);
-    });
+    let mut u = ui.borrow_mut();
+    if let Some(t) = u.toast_timer.take() {
+        t.remove();
+    }
+    u.toast.set_text(message);
+    let bx = u.toast.parent();
+    if let Some(bx) = &bx {
+        bx.set_visible(true);
+    }
+    let weak = Rc::downgrade(&ui);
+    u.toast_timer = Some(glib::timeout_add_local_once(std::time::Duration::from_millis(3500), move || {
+        if let Some(ui) = weak.upgrade() {
+            let mut u = ui.borrow_mut();
+            u.toast_timer = None;
+            if let Some(bx) = u.toast.parent() {
+                bx.set_visible(false);
+            }
+        }
+    }));
 }
 
 pub fn current() -> &'static str {

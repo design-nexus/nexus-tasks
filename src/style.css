@@ -189,6 +189,34 @@ entry.settings-search image {
   color: @theme_dim_text;
 }
 
+.group-head {
+  margin: 18px 2px 4px;
+}
+
+.group-head .group-title {
+  margin: 0;
+}
+
+window.tasks-window button.group-action {
+  min-height: 26px;
+  min-width: 26px;
+  padding: 0 4px;
+}
+
+.tile-editor {
+  min-width: 220px;
+}
+
+.priority-custom {
+  margin-top: 6px;
+  padding: 6px 4px 2px;
+  border-top: 1px solid alpha(@theme_border, 0.55);
+}
+
+.loading {
+  padding: 24px 0;
+}
+
 .group-note {
   margin: -2px 2px 10px;
   font-size: 0.88em;
@@ -250,6 +278,11 @@ entry.settings-search image {
 
 .dim {
   color: @theme_dim_text;
+}
+
+label.warning-text,
+.stat-value.warning-text {
+  color: @theme_danger;
 }
 
 .danger-text {
@@ -335,6 +368,12 @@ window.tasks-window button.chip {
   padding: 0 12px;
   border-radius: 999px;
   font-size: 0.9em;
+}
+
+window.tasks-window button.chip.small {
+  min-height: 22px;
+  padding: 0 9px;
+  font-size: 0.82em;
 }
 
 window.tasks-window button.chip.selected {
@@ -699,6 +738,20 @@ window.tasks-window button.stat-tile:hover {
   color: @theme_text;
 }
 
+.core-tile {
+  background: mix(@theme_bg, @theme_surface, 0.5);
+  border: 1px solid alpha(@theme_border, 0.45);
+  border-radius: 6px;
+  padding: 6px 8px;
+  min-width: 58px;
+}
+.core-tile .core-value { font-size: 0.95em; font-weight: 700; }
+.core-tile.heat-1 { background: mix(@theme_bg, @theme_accent, 0.08); }
+.core-tile.heat-2 { background: mix(@theme_bg, @theme_accent, 0.16); }
+.core-tile.heat-3 { background: mix(@theme_bg, @theme_accent, 0.26); }
+.core-tile.heat-4 { background: mix(@theme_bg, @theme_accent, 0.38); }
+.core-tile.heat-5 { background: mix(@theme_bg, @theme_accent, 0.52); }
+
 /* ---------- Key figures ---------- */
 
 .kv-key {
@@ -734,6 +787,10 @@ window.tasks-window levelbar > trough > block.filled {
 }
 
 window.tasks-window levelbar > trough > block.filled.hot {
+  background: @theme_danger;
+}
+
+window.tasks-window levelbar.warn > trough > block.filled {
   background: @theme_danger;
 }
 
@@ -804,8 +861,8 @@ window.tasks-window columnview {
 }
 
 window.tasks-window columnview > header {
-  background: transparent;
-  border-bottom: 1px solid alpha(@theme_border, 0.55);
+  background: mix(@theme_bg, @theme_muted, 0.32);
+  border-bottom: 1px solid alpha(@theme_border, 0.8);
 }
 
 window.tasks-window columnview > header > button {
@@ -863,10 +920,16 @@ window.tasks-window columnview > listview > row > cell {
   font-size: 0.92em;
 }
 
-.cell-hot {
-  color: @theme_accent;
-  font-weight: 700;
+/* Busy cells get a stronger accent wash, five steps. */
+.cell-num {
+  padding: 1px 5px;
+  border-radius: 4px;
 }
+.cell-num.heat-1 { background: alpha(@theme_accent, 0.07); }
+.cell-num.heat-2 { background: alpha(@theme_accent, 0.13); }
+.cell-num.heat-3 { background: alpha(@theme_accent, 0.2); }
+.cell-num.heat-4 { background: alpha(@theme_accent, 0.28); font-weight: 700; }
+.cell-num.heat-5 { background: alpha(@theme_accent, 0.38); font-weight: 700; color: @theme_text; }
 
 .cell-dim {
   color: @theme_dim_text;
@@ -890,6 +953,11 @@ window.tasks-window button.tree-expander {
 
 window.tasks-window button.tree-expander:hover {
   background: alpha(@theme_highlight, 0.55);
+}
+
+.details-panel.docked {
+  margin-top: 0;
+  margin-left: 10px;
 }
 
 .details-panel {

@@ -53,14 +53,36 @@ pub fn build(page: &Page) {
 
     // ----- Per core -----
     let g = page.group("Each thread");
-    g.note("Busy time of every logical processor, with its current clock.");
+    let grid = crate::prefs::get().cpu_grid;
+    g.note(if grid {
+        "Busy time of every logical processor; darker is busier."
+    } else {
+        "Busy time of every logical processor, with its current clock."
+    });
+    let switch = widgets::hbox(4);
+    for (label, as_grid) in [("Graphs", false), ("Grid", true)] {
+        let b = gtk::Button::with_label(label);
+        b.add_css_class("chip");
+        b.add_css_class("small");
+        if as_grid == grid {
+            b.add_css_class("selected");
+        }
+        b.connect_clicked(move |_| {
+            if crate::prefs::get().cpu_grid != as_grid {
+                crate::prefs::update(|p| p.cpu_grid = as_grid);
+                crate::window::rebuild("cpu");
+            }
+        });
+        switch.append(&b);
+    }
+    g.header_end(&switch);
     let flow = gtk::FlowBox::new();
     flow.set_selection_mode(gtk::SelectionMode::None);
     flow.set_homogeneous(true);
-    flow.set_min_children_per_line(2);
-    flow.set_max_children_per_line(8);
-    flow.set_row_spacing(8);
-    flow.set_column_spacing(8);
+    flow.set_min_children_per_line(if grid { 4 } else { 2 });
+    flow.set_max_children_per_line(if grid { 16 } else { 8 });
+    flow.set_row_spacing(if grid { 6 } else { 8 });
+    flow.set_column_spacing(if grid { 6 } else { 8 });
     g.add(&flow);
     let threads = live::latest()
         .map(|s| s.cpu.cores.len())
@@ -69,28 +91,50 @@ pub fn build(page: &Page) {
     let mut values = Vec::new();
     for i in 0..threads {
         let cell = widgets::vbox(2);
-        cell.add_css_class("core-cell");
-        let head = widgets::hbox(6);
+        cell.add_css_class(if grid { "core-tile" } else { "core-cell" });
         let name = widgets::label(&format!("CPU {i}"), "core-name");
-        name.set_hexpand(true);
         let value = widgets::label("", "core-value");
         value.add_css_class("mono");
-        head.append(&name);
-        head.append(&value);
-        cell.append(&head);
-        cell.append(&graph::sparkline(&format!("cpu.{i}"), Tone::Accent, Scale::Percent, 34));
+        if grid {
+            cell.append(&name);
+            cell.append(&value);
+        } else {
+            let head = widgets::hbox(6);
+            name.set_hexpand(true);
+            head.append(&name);
+            head.append(&value);
+            cell.append(&head);
+            cell.append(&graph::sparkline(
+                vec![graph::Series::new(format!("cpu.{i}"), "", Tone::Accent)],
+                Scale::Percent,
+                34,
+                fmt::pct,
+            ));
+        }
         flow.append(&cell);
         if let Some(c) = flow.last_child() {
             c.set_focusable(false);
         }
-        values.push(value);
+        values.push((cell, value));
     }
     live::on_tick(&flow, move |s| {
-        for (i, v) in values.iter().enumerate() {
+        for (i, (cell, v)) in values.iter().enumerate() {
             let busy = s.cpu.cores.get(i).copied().unwrap_or(0.0);
             let freq = s.cpu.freqs.get(i).copied().unwrap_or(0.0);
-            v.set_text(&format!("{} · {:.1}", fmt::pct(busy), freq / 1000.0));
-            v.set_tooltip_text(Some(&format!("{} busy at {}", fmt::pct(busy), fmt::mhz(freq))));
+            if grid {
+                v.set_text(&fmt::pct(busy));
+                let level = [10.0, 30.0, 50.0, 70.0, 90.0].iter().filter(|t| busy >= **t).count();
+                for (n, class) in ["heat-1", "heat-2", "heat-3", "heat-4", "heat-5"].iter().enumerate() {
+                    if n + 1 == level {
+                        cell.add_css_class(class);
+                    } else {
+                        cell.remove_css_class(class);
+                    }
+                }
+            } else {
+                v.set_text(&format!("{} · {:.1}", fmt::pct(busy), freq / 1000.0));
+            }
+            cell.set_tooltip_text(Some(&format!("CPU {i}: {} busy at {}", fmt::pct(busy), fmt::mhz(freq))));
         }
     });
 }

@@ -1,11 +1,13 @@
 //! Tasks — a task manager for Omarchy.
 
 mod actions;
+mod alerts;
 mod apps;
 mod cmd;
 mod fmt;
 mod graph;
 mod live;
+mod palette;
 mod paths;
 mod prefs;
 mod sampler;
@@ -41,6 +43,14 @@ fn main() -> glib::ExitCode {
     }
 
     let app = gtk::Application::builder().application_id(APP_ID).flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE).build();
+    // Notifications open the page they're about.
+    let show = gio::SimpleAction::new("show", Some(glib::VariantTy::STRING));
+    let a = app.clone();
+    show.connect_activate(move |_, v| {
+        let section = v.and_then(|v| v.get::<String>());
+        window::present(&a, section.as_deref());
+    });
+    app.add_action(&show);
     app.connect_command_line(|app, cl| {
         let argv: Vec<String> = cl.arguments().iter().map(|a| a.to_string_lossy().to_string()).collect();
         let section = argv.iter().position(|a| a == "--section").and_then(|i| argv.get(i + 1)).cloned();

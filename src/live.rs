@@ -22,6 +22,8 @@ struct Live {
     control: Option<Arc<Control>>,
     tracked: HashSet<i32>,
     pending: Vec<Pending>,
+    /// Called with every snapshot, on screen or not (alerts).
+    always: Vec<Callback>,
 }
 
 thread_local! {
@@ -127,6 +129,51 @@ pub fn on_tick<W: IsA<gtk::Widget>>(widget: &W, f: impl Fn(&Snapshot) + 'static)
     LIVE.with(|l| l.borrow_mut().subs.push((weak, f)));
 }
 
+/// Call `f` with every snapshot for as long as the app runs, whatever is on screen.
+pub fn on_every(f: impl Fn(&Snapshot) + 'static) {
+    LIVE.with(|l| l.borrow_mut().always.push(Rc::new(f)));
+}
+
+/// Graph history as CSV: a `seconds_ago` column, then one column per series
+/// (sorted by name), oldest row first. `keys` limits it to those series.
+pub fn csv(keys: Option<&[String]>) -> String {
+    let interval = prefs::get().interval_ms as f64 / 1000.0;
+    LIVE.with(|l| {
+        let l = l.borrow();
+        let series: Vec<(&str, Vec<f64>)> = l
+            .history
+            .iter()
+            .filter(|(k, _)| keys.is_none_or(|keys| keys.contains(k)))
+            .map(|(k, v)| (k.as_str(), v.iter().copied().collect()))
+            .collect();
+        to_csv(series, interval)
+    })
+}
+
+fn to_csv(mut series: Vec<(&str, Vec<f64>)>, interval: f64) -> String {
+    series.sort_by(|a, b| a.0.cmp(b.0));
+    let rows = series.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
+    let mut out = String::from("seconds_ago");
+    for (k, _) in &series {
+        out.push(',');
+        out.push_str(k);
+    }
+    out.push('\n');
+    for i in 0..rows {
+        let back = rows - 1 - i;
+        out.push_str(&format!("{}", (back as f64 * interval * 1000.0).round() / 1000.0));
+        for (_, v) in &series {
+            out.push(',');
+            // Shorter series end at "now" too; they have nothing that far back.
+            if back < v.len() {
+                out.push_str(&format!("{}", v[v.len() - 1 - back]));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
 fn push(history: &mut HashMap<String, VecDeque<f64>>, cap: usize, key: String, value: f64) {
     let v = history.entry(key).or_default();
     v.push_back(value);
@@ -220,7 +267,20 @@ fn receive(snap: Snapshot) {
         l.subs.retain(|(w, _)| w.upgrade().is_some());
         l.subs.iter().filter(|(w, _)| w.upgrade().is_some_and(|w| w.is_mapped())).map(|(_, f)| f.clone()).collect()
     });
-    for f in callbacks {
+    let always: Vec<Callback> = LIVE.with(|l| l.borrow().always.clone());
+    for f in callbacks.into_iter().chain(always) {
         f(&snap);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writes_csv() {
+        let csv = to_csv(vec![("mem", vec![1.0, 2.0, 3.0]), ("cpu", vec![9.5])], 0.5);
+        assert_eq!(csv, "seconds_ago,cpu,mem\n1,,1\n0.5,,2\n0,9.5,3\n");
+        assert_eq!(to_csv(vec![], 1.0), "seconds_ago\n");
     }
 }

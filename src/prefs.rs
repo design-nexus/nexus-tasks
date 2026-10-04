@@ -41,6 +41,39 @@ pub struct Prefs {
     pub hidden_columns: Vec<String>,
     /// Processes view: apps, all, tree or mine.
     pub process_view: String,
+    /// Processes column widths in pixels, by column id.
+    pub column_widths: std::collections::HashMap<String, i32>,
+    /// Processes column order, by column id.
+    pub column_order: Vec<String>,
+    /// Processes sort column id and direction.
+    pub sort_column: String,
+    pub sort_desc: bool,
+    /// Overview tiles to show, in order: cpu, mem, gpu, disk, net, temp, bat.
+    pub overview_tiles: Vec<String>,
+    /// The metric each "Busiest processes" card ranks by: cpu, mem, disk or gpu.
+    pub overview_top: Vec<String>,
+    /// The CPU page shows each thread as a small tile instead of a graph.
+    pub cpu_grid: bool,
+    /// Warning thresholds: CPU temperature (°C), memory use and disk fullness (%).
+    pub warn_temp: f64,
+    pub warn_mem: f64,
+    pub warn_disk: f64,
+    /// Desktop notifications: CPU temperature and memory past their warning
+    /// thresholds, a process over `alert_proc_cpu`% for `alert_proc_secs`, a failed service.
+    pub alert_temp: bool,
+    pub alert_mem: bool,
+    pub alert_proc: bool,
+    pub alert_proc_cpu: f64,
+    pub alert_proc_secs: u64,
+    pub alert_services: bool,
+    /// The process details panel shows only its head line.
+    pub details_compact: bool,
+    /// Services page: "user" or "system".
+    pub services_scope: String,
+    /// Services page: list timers instead of services.
+    pub services_timers: bool,
+    /// Services page: all, running or failed.
+    pub services_show: String,
 }
 
 impl Default for Prefs {
@@ -61,6 +94,26 @@ impl Default for Prefs {
             pause_hidden: true,
             hidden_columns: vec!["threads".into(), "state".into()],
             process_view: "all".into(),
+            column_widths: Default::default(),
+            column_order: Vec::new(),
+            sort_column: "cpu".into(),
+            sort_desc: true,
+            overview_tiles: ["cpu", "mem", "gpu", "disk", "net", "temp", "bat"].map(String::from).to_vec(),
+            overview_top: vec!["cpu".into(), "mem".into()],
+            cpu_grid: false,
+            warn_temp: 85.0,
+            warn_mem: 90.0,
+            warn_disk: 95.0,
+            alert_temp: false,
+            alert_mem: false,
+            alert_proc: false,
+            alert_proc_cpu: 50.0,
+            alert_proc_secs: 30,
+            alert_services: false,
+            details_compact: false,
+            services_scope: "user".into(),
+            services_timers: false,
+            services_show: "all".into(),
         }
     }
 }

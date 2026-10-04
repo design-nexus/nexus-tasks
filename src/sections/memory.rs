@@ -52,6 +52,7 @@ pub fn build(page: &Page) {
     live::on_tick(&comp, move |s| {
         let m = &s.mem;
         summary.set_text(&format!("{} of {}", fmt::bytes(m.used as f64), fmt::bytes(m.total as f64)));
+        widgets::set_warn(&summary, m.total > 0 && m.used as f64 / m.total as f64 * 100.0 >= crate::prefs::get().warn_mem);
         let w = b2.width().max(1) as f64;
         if m.total > 0 {
             used.set_size_request((m.used as f64 / m.total as f64 * w) as i32, 10);

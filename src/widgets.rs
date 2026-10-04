@@ -135,6 +135,20 @@ impl Group {
         self.list.append(w);
     }
 
+    /// Put a small control at the right end of the group's title line.
+    pub fn header_end(&self, w: &impl IsA<gtk::Widget>) {
+        let Some(title) = self.wrapper.first_child() else { return };
+        self.wrapper.remove(&title);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.add_css_class("group-head");
+        title.set_hexpand(true);
+        title.set_valign(gtk::Align::Center);
+        row.append(&title);
+        w.set_valign(gtk::Align::Center);
+        row.append(w);
+        self.wrapper.prepend(&row);
+    }
+
     pub fn note(&self, text: &str) {
         let l = gtk::Label::new(None);
         l.set_markup(text);
@@ -229,6 +243,21 @@ pub fn switch_row(title: &str, desc: &str, active: bool, on_change: impl Fn(bool
     sw.connect_active_notify(move |s| on_change(s.is_active()));
     let r = row(title, desc, Some(sw.upcast_ref()));
     (r, sw)
+}
+
+/// A row with a number field. `on_change` gets each new value.
+pub fn spin_row(
+    title: &str,
+    desc: &str,
+    (min, max, step): (f64, f64, f64),
+    value: f64,
+    on_change: impl Fn(f64) + 'static,
+) -> (gtk::Box, gtk::SpinButton) {
+    let spin = gtk::SpinButton::with_range(min, max, step);
+    spin.set_value(value);
+    spin.set_valign(gtk::Align::Center);
+    spin.connect_value_changed(move |s| on_change(s.value()));
+    (row(title, desc, Some(spin.upcast_ref())), spin)
 }
 
 pub fn dropdown(options: &[(String, String)], current: &str) -> gtk::DropDown {
@@ -344,6 +373,24 @@ pub fn kv_flow(keys: &[&str]) -> (gtk::FlowBox, Vec<gtk::Label>) {
     (flow, values)
 }
 
+/// Mark a value as past its warning threshold (or not).
+pub fn set_warn(w: &impl IsA<gtk::Widget>, over: bool) {
+    if over {
+        w.add_css_class("warning-text");
+    } else {
+        w.remove_css_class("warning-text");
+    }
+}
+
+/// A usage bar with its own threshold: `danger` when `over`.
+pub fn warn_bar(bar: &gtk::LevelBar, over: bool) {
+    if over {
+        bar.add_css_class("warn");
+    } else {
+        bar.remove_css_class("warn");
+    }
+}
+
 /// A thin usage bar that turns `danger` above 90%.
 pub fn usage_bar() -> gtk::LevelBar {
     let bar = gtk::LevelBar::for_interval(0.0, 1.0);
@@ -355,6 +402,17 @@ pub fn usage_bar() -> gtk::LevelBar {
     bar.set_hexpand(true);
     bar.set_valign(gtk::Align::Center);
     bar
+}
+
+/// A spinner with a line of text, for content that's still loading.
+pub fn loading(text: &str) -> gtk::Box {
+    let b = hbox(10);
+    b.add_css_class("loading");
+    let spinner = gtk::Spinner::new();
+    spinner.start();
+    b.append(&spinner);
+    b.append(&label(text, "dim"));
+    b
 }
 
 /// A small pill label ("Stopped", "Omarchy", "Failed").
@@ -371,24 +429,44 @@ pub fn tag(text: &str, kind: &str) -> gtk::Label {
 /// A button that needs two clicks: the first arms it ("Click again to …"),
 /// the second acts. It disarms itself after a few seconds.
 pub fn two_click(label_text: &str, armed_text: &str, act: impl Fn() + 'static) -> gtk::Button {
+    two_click_if(label_text, armed_text, || true, act)
+}
+
+/// Like `two_click`, but `confirm` is asked on every click; when it says no,
+/// one click acts. While armed the button has the `armed` class, and its label
+/// may be changed by the caller at any other time.
+pub fn two_click_if(
+    label_text: &str,
+    armed_text: &str,
+    confirm: impl Fn() -> bool + 'static,
+    act: impl Fn() + 'static,
+) -> gtk::Button {
     let b = gtk::Button::with_label(label_text);
     b.add_css_class("destructive-action");
-    let armed = Rc::new(std::cell::Cell::new(false));
-    let (idle, armed_label) = (label_text.to_string(), armed_text.to_string());
+    let idle = Rc::new(RefCell::new(String::new()));
+    let armed_label = armed_text.to_string();
+    // Each arming gets a number, so an old timer can't disarm a newer one.
+    let generation = Rc::new(std::cell::Cell::new(0u32));
     b.connect_clicked(move |b| {
-        if armed.get() {
-            armed.set(false);
-            b.set_label(&idle);
+        if b.has_css_class("armed") {
+            b.remove_css_class("armed");
+            b.set_label(&idle.borrow());
             act();
             return;
         }
-        armed.set(true);
+        if !confirm() {
+            act();
+            return;
+        }
+        *idle.borrow_mut() = b.label().map(|l| l.to_string()).unwrap_or_default();
+        b.add_css_class("armed");
         b.set_label(&armed_label);
-        let (b2, armed2, idle2) = (b.clone(), armed.clone(), idle.clone());
+        generation.set(generation.get().wrapping_add(1));
+        let (b2, idle2, gen2, mine) = (b.clone(), idle.clone(), generation.clone(), generation.get());
         gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(4), move || {
-            if armed2.get() {
-                armed2.set(false);
-                b2.set_label(&idle2);
+            if b2.has_css_class("armed") && gen2.get() == mine {
+                b2.remove_css_class("armed");
+                b2.set_label(&idle2.borrow());
             }
         });
     });

@@ -143,6 +143,73 @@ pub fn build(page: &Page) {
     );
     g.add(&r);
 
+    let (r, _) = widgets::button_row(
+        "Export graph history",
+        "Save every graph's history as a CSV file. Right-click a graph to save just that one.",
+        "Export…",
+        |_| crate::actions::export_csv("tasks-history", None),
+    );
+    g.add(&r);
+
+    // ----- Warnings -----
+    let g = page.group("Warnings");
+    g.note("Past these, values turn red, and alerts (below) can notify you.");
+    // Stored in °C; shown in the chosen unit.
+    let f = p.fahrenheit;
+    let to_unit = move |c: f64| if f { c * 9.0 / 5.0 + 32.0 } else { c };
+    let (r, _) = widgets::spin_row(
+        &format!("CPU temperature ({})", if f { "°F" } else { "°C" }),
+        "How hot the CPU may get. The unit follows the setting above, from the next time this page opens.",
+        if f { (120.0, 230.0, 1.0) } else { (50.0, 110.0, 1.0) },
+        to_unit(p.warn_temp).round(),
+        move |v| prefs::update(|p| p.warn_temp = if f { (v - 32.0) * 5.0 / 9.0 } else { v }),
+    );
+    g.add(&r);
+    let (r, _) = widgets::spin_row("Memory in use (%)", "How full RAM may get.", (50.0, 100.0, 1.0), p.warn_mem, |v| {
+        prefs::update(|p| p.warn_mem = v)
+    });
+    g.add(&r);
+    let (r, _) = widgets::spin_row("Disk full (%)", "How full a mounted drive may get.", (50.0, 100.0, 1.0), p.warn_disk, |v| {
+        prefs::update(|p| p.warn_disk = v)
+    });
+    g.add(&r);
+
+    // ----- Alerts -----
+    let g = page.group("Alerts");
+    g.note(
+        "Desktop notifications, at most one of each kind every 5 minutes. They work while Tasks is open, \
+         on screen or not. The process alert pauses while \"Rest while hidden\" has stopped reading processes.",
+    );
+    let (r, _) = widgets::switch_row("CPU too hot", "Past the temperature warning above.", p.alert_temp, |on| {
+        prefs::update(|p| p.alert_temp = on)
+    });
+    g.add(&r);
+    let (r, _) = widgets::switch_row("Memory running out", "Past the memory warning above.", p.alert_mem, |on| {
+        prefs::update(|p| p.alert_mem = on)
+    });
+    g.add(&r);
+    let (r, _) =
+        widgets::switch_row("A service failed", "A user or system service stops with an error.", p.alert_services, |on| {
+            prefs::update(|p| p.alert_services = on)
+        });
+    g.add(&r);
+    let (r, _) = widgets::switch_row(
+        "A process keeps the CPU busy",
+        "One process stays over the limit below for the time below.",
+        p.alert_proc,
+        |on| prefs::update(|p| p.alert_proc = on),
+    );
+    g.add(&r);
+    let (r, _) =
+        widgets::spin_row("Process CPU limit (%)", "Share of the whole processor.", (10.0, 100.0, 5.0), p.alert_proc_cpu, |v| {
+            prefs::update(|p| p.alert_proc_cpu = v)
+        });
+    g.add(&r);
+    let (r, _) = widgets::spin_row("For at least (seconds)", "", (5.0, 600.0, 5.0), p.alert_proc_secs as f64, |v| {
+        prefs::update(|p| p.alert_proc_secs = v as u64)
+    });
+    g.add(&r);
+
     // ----- Processes -----
     let g = page.group("Processes");
     let (r, _) = widgets::switch_row(
@@ -166,12 +233,18 @@ pub fn build(page: &Page) {
     // ----- Keyboard -----
     let g = page.group("Keyboard");
     for (keys, what) in [
+        (&["Ctrl", "K"][..], "Go to a page, process, service or startup item"),
         (&["Ctrl", "F"][..], "Search pages, or filter processes on the Processes page"),
+        (&["/"][..], "Filter processes (from the process list)"),
         (&["Ctrl", "P"][..], "Pause or resume updates"),
-        (&["Delete"][..], "End the selected process"),
-        (&["Shift", "Delete"][..], "Kill the selected process"),
+        (&["Ctrl", "B"][..], "Collapse or expand the sidebar"),
+        (&["Enter"][..], "Open a group, or switch to the process's window"),
+        (&["← / →"][..], "Close or open a branch in Apps and Tree"),
+        (&["Delete"][..], "End the selected processes"),
+        (&["Shift", "Delete"][..], "Kill the selected processes"),
+        (&["Right-click"][..], "Actions for a process, or export a graph"),
         (&["Esc"][..], "Clear the search"),
-        (&["Ctrl", "Q"][..], "Close"),
+        (&["Ctrl", "W"][..], "Close (Ctrl+Q too)"),
     ] {
         let caps = widgets::hbox(4);
         for (i, k) in keys.iter().enumerate() {

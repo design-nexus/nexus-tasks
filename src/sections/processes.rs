@@ -116,10 +116,11 @@ const COLUMNS: &[(Col, &str, &str, i32)] = &[
     (Col::Name, "name", "Name", 0),
     (Col::Pid, "pid", "PID", 66),
     (Col::User, "user", "User", 84),
-    (Col::Cpu, "cpu", "CPU", 66),
-    (Col::Mem, "mem", "Memory", 88),
-    (Col::Disk, "disk", "Disk", 96),
-    (Col::Gpu, "gpu", "GPU", 62),
+    // Wide enough for the totals in their titles ("CPU 23%").
+    (Col::Cpu, "cpu", "CPU", 80),
+    (Col::Mem, "mem", "Memory", 108),
+    (Col::Disk, "disk", "Disk", 100),
+    (Col::Gpu, "gpu", "GPU", 76),
     (Col::Threads, "threads", "Threads", 72),
     (Col::State, "state", "State", 88),
 ];
@@ -202,6 +203,11 @@ struct State {
     pending_reveal: Option<i32>,
     details: Option<Details>,
     my_uid: u32,
+    /// The table card, or the "nothing matches" message.
+    table: gtk::Stack,
+    empty: gtk::Label,
+    /// Holds the table and the details panel, stacked or side by side.
+    split: gtk::Box,
 }
 
 thread_local! {
@@ -252,11 +258,33 @@ fn setup_cell(col: Col) -> gtk::Widget {
     }
 }
 
-fn set_hot(l: &gtk::Label, hot: bool, zero: bool) {
-    if hot {
-        l.add_css_class("cell-hot");
-    } else {
-        l.remove_css_class("cell-hot");
+thread_local! {
+    /// Total RAM, for scaling the memory column's shading.
+    static MEM_TOTAL: Cell<u64> = const { Cell::new(0) };
+}
+
+const HEAT: [&str; 5] = ["heat-1", "heat-2", "heat-3", "heat-4", "heat-5"];
+
+/// How busy a value is, 0 (idle) to 5, for shading its cell.
+fn heat_level(col: Col, v: f64, mem_total: u64) -> usize {
+    let steps: [f64; 5] = match col {
+        Col::Cpu | Col::Gpu => [1.0, 5.0, 15.0, 30.0, 60.0],
+        // Share of RAM, in percent.
+        Col::Mem => [1.0, 3.0, 8.0, 15.0, 30.0],
+        Col::Disk => [64e3, 1e6, 10e6, 50e6, 200e6],
+        _ => return 0,
+    };
+    let v = if col == Col::Mem { if mem_total > 0 { v / mem_total as f64 * 100.0 } else { 0.0 } } else { v };
+    steps.iter().filter(|s| v >= **s).count()
+}
+
+fn set_heat(l: &gtk::Label, level: usize, zero: bool) {
+    for (i, class) in HEAT.iter().enumerate() {
+        if i + 1 == level {
+            l.add_css_class(class);
+        } else {
+            l.remove_css_class(class);
+        }
     }
     if zero {
         l.add_css_class("cell-dim");
@@ -319,37 +347,39 @@ fn render(col: Col, row: &Row, w: &gtk::Widget, view: View) {
         }
         _ => {
             let Some(l) = w.downcast_ref::<gtk::Label>() else { return };
-            let (text, hot, zero) = match col {
-                Col::Pid => (row.p.pid.to_string(), false, false),
-                Col::User => (row.p.user.clone(), false, false),
+            let mem_total = MEM_TOTAL.with(|m| m.get());
+            let heat = |v: f64| heat_level(col, v, mem_total);
+            let (text, level, zero) = match col {
+                Col::Pid => (row.p.pid.to_string(), 0, false),
+                Col::User => (row.p.user.clone(), 0, false),
                 Col::Cpu => {
                     let v = row.cpu();
-                    (if v < 0.05 { "0".into() } else { format!("{v:.1}") }, v >= 25.0, v < 0.05)
+                    (if v < 0.05 { "0".into() } else { format!("{v:.1}") }, heat(v), v < 0.05)
                 }
-                Col::Mem => (fmt::bytes(row.mem() as f64), row.mem() > 1 << 31, row.mem() == 0),
+                Col::Mem => (fmt::bytes(row.mem() as f64), heat(row.mem() as f64), row.mem() == 0),
                 Col::Disk => {
                     let v = row.disk();
-                    (if v < 1.0 { "0".into() } else { fmt::rate(v) }, v > 20.0 * 1024.0 * 1024.0, v < 1.0)
+                    (if v < 1.0 { "0".into() } else { fmt::rate(v) }, heat(v), v < 1.0)
                 }
                 Col::Gpu => {
                     let v = row.gpu();
                     if v >= 0.05 {
-                        (format!("{v:.1}"), v >= 25.0, false)
+                        (format!("{v:.1}"), heat(v), false)
                     } else if row.p.nvidia {
-                        ("dGPU".into(), false, false)
+                        ("dGPU".into(), 0, false)
                     } else {
-                        ("0".into(), false, true)
+                        ("0".into(), 0, true)
                     }
                 }
-                Col::Threads => (row.threads().to_string(), false, false),
-                Col::State => (state_name(row.p.state).to_string(), false, false),
+                Col::Threads => (row.threads().to_string(), 0, false),
+                Col::State => (state_name(row.p.state).to_string(), 0, false),
                 Col::Name => unreachable!(),
             };
             if l.text() != text {
                 l.set_text(&text);
             }
             if !matches!(col, Col::User | Col::State) {
-                set_hot(l, hot, zero);
+                set_heat(l, level, zero);
             }
         }
     }
@@ -483,9 +513,30 @@ fn update(snap: &Snapshot) {
     if !added.is_empty() {
         store.extend_from_slice(&added);
     }
+    MEM_TOTAL.with(|m| m.set(snap.mem.total));
     apply_view(&st);
-    if let Some(pid) = st.borrow_mut().pending_reveal.take() {
-        select_pid(pid);
+    let pending = st.borrow().pending_reveal;
+    if let Some(pid) = pending {
+        let (exists, visible) = st.borrow().objects.get(&pid).map_or((false, false), |o| (true, o.row().visible));
+        if visible || !exists {
+            st.borrow_mut().pending_reveal = None;
+        }
+        if visible {
+            select_pid(pid);
+        }
+    }
+    {
+        let s = st.borrow();
+        update_titles(&s, snap);
+        let none = s.selection.n_items() == 0;
+        let q = s.query.trim();
+        if none && !q.is_empty() {
+            s.empty.set_text(&format!("No processes match “{q}”."));
+        }
+        s.table.set_visible_child_name(if none && !q.is_empty() { "empty" } else { "table" });
+        let narrow = s.split.parent().is_some_and(|p| p.has_css_class("narrow"));
+        let wide = s.split.width() >= DOCK_WIDTH && !narrow;
+        set_docked(&s, wide);
     }
     refresh_details(snap);
 }
@@ -543,7 +594,7 @@ fn layout(s: &mut State, window_pids: &HashSet<i32>) {
         }
     };
 
-    let tree_view = matches!(s.view, View::Apps | View::Tree) && q.is_empty();
+    let tree_view = matches!(s.view, View::Apps | View::Tree);
     if !tree_view {
         let my_uid = s.my_uid;
         let mine = s.view == View::Mine;
@@ -641,12 +692,23 @@ fn layout(s: &mut State, window_pids: &HashSet<i32>) {
             };
             if desc { o.reverse() } else { o }
         });
+        // Filtering keeps the tree: matches show with the path down to them opened.
+        let keep: Option<HashSet<i32>> = (!q.is_empty()).then(|| {
+            let parents: HashMap<i32, i32> = rows.values().map(|r| (r.p.pid, r.p.ppid)).collect();
+            let hits: HashSet<i32> = rows.values().filter(|r| matches(r, q)).map(|r| r.p.pid).collect();
+            with_ancestors(&hits, &parents)
+        });
         let mut order = 0u32;
         let mut stack: Vec<(i32, u32, bool)> = roots.iter().rev().map(|p| (*p, 0, true)).collect();
         while let Some((pid, depth, shown)) = stack.pop() {
             let kids = children.get(&pid).cloned().unwrap_or_default();
             let has_children = !kids.is_empty();
-            let expanded = has_children && if s.view == View::Apps { s.opened.contains(&pid) } else { !s.closed.contains(&pid) };
+            let (shown, expanded) = match &keep {
+                Some(keep) => (shown && keep.contains(&pid), has_children && kids.iter().any(|k| keep.contains(k))),
+                None => {
+                    (shown, has_children && if s.view == View::Apps { s.opened.contains(&pid) } else { !s.closed.contains(&pid) })
+                }
+            };
             let a = if has_children && !expanded { Some(agg(pid, &rows, &children, &mut memo)) } else { None };
             out.insert(pid, (shown, order, depth, has_children, expanded, a));
             order += 1;
@@ -675,6 +737,22 @@ fn layout(s: &mut State, window_pids: &HashSet<i32>) {
             }
         }
     }
+}
+
+/// The given pids plus every ancestor of each (following `parents`, pid → ppid).
+fn with_ancestors(pids: &HashSet<i32>, parents: &HashMap<i32, i32>) -> HashSet<i32> {
+    let mut out = pids.clone();
+    for pid in pids {
+        let mut cur = *pid;
+        // Bounded, in case of a loop in stale data.
+        for _ in 0..64 {
+            match parents.get(&cur) {
+                Some(&pp) if pp != cur && out.insert(pp) => cur = pp,
+                _ => break,
+            }
+        }
+    }
+    out
 }
 
 /// Recompute the view right away (after a view, filter or expand change).
@@ -774,8 +852,9 @@ pub fn focus_search() {
     }
 }
 
+/// The selected processes, minus kernel threads (signals can't reach them).
 fn targets(st: &State) -> Vec<(i32, String)> {
-    selected(st).iter().map(|o| (o.row().p.pid, o.row().p.name.clone())).collect()
+    selected(st).iter().filter(|o| !o.row().p.kernel).map(|o| (o.row().p.pid, o.row().p.name.clone())).collect()
 }
 
 fn end_selected(sig: Signal) {
@@ -793,6 +872,8 @@ struct Details {
     icon: gtk::Image,
     title: gtk::Label,
     subtitle: gtk::Label,
+    /// Everything below the head; hidden while the panel is collapsed.
+    more: gtk::Box,
     values: Vec<gtk::Label>,
     cmdline: gtk::Label,
     graphs: gtk::Box,
@@ -800,7 +881,76 @@ struct Details {
     focus: gtk::Button,
     close: gtk::Button,
     pause: gtk::Button,
+    priority: gtk::MenuButton,
+    nice_checks: Vec<(i32, gtk::Image)>,
+    kill: gtk::Button,
     end: gtk::Button,
+}
+
+/// The selected processes that signals may go to (kernel threads left out).
+fn panel_targets() -> Vec<(i32, String)> {
+    state().map(|s| targets(&s.borrow())).unwrap_or_default()
+}
+
+fn priority_popover(pid: &Rc<Cell<i32>>) -> (gtk::Popover, Vec<(i32, gtk::Image)>) {
+    let pop = gtk::Popover::new();
+    let plist = widgets::vbox(2);
+    let mut checks = Vec::new();
+    for (label, nice) in [
+        ("Highest (-15)", -15),
+        ("High (-5)", -5),
+        ("Normal (0)", 0),
+        ("Low (5)", 5),
+        ("Lowest (10)", 10),
+        ("Background (19)", 19),
+    ] {
+        let b = gtk::Button::new();
+        b.add_css_class("flat");
+        let row = widgets::hbox(8);
+        let check = gtk::Image::from_icon_name("object-select-symbolic");
+        check.set_opacity(0.0);
+        let l = widgets::label(label, "");
+        l.set_hexpand(true);
+        row.append(&l);
+        row.append(&check);
+        b.set_child(Some(&row));
+        let pop2 = pop.clone();
+        b.connect_clicked(move |_| {
+            pop2.popdown();
+            let t = panel_targets();
+            if !t.is_empty() {
+                actions::renice(&t, nice);
+            }
+        });
+        plist.append(&b);
+        checks.push((nice, check));
+    }
+    let custom = widgets::hbox(6);
+    custom.add_css_class("priority-custom");
+    custom.append(&widgets::label("Custom", "dim"));
+    let spin = gtk::SpinButton::with_range(-20.0, 19.0, 1.0);
+    spin.set_hexpand(true);
+    custom.append(&spin);
+    let apply = gtk::Button::with_label("Set");
+    let (pop2, spin2) = (pop.clone(), spin.clone());
+    apply.connect_clicked(move |_| {
+        pop2.popdown();
+        let t = panel_targets();
+        if !t.is_empty() {
+            actions::renice(&t, spin2.value_as_int());
+        }
+    });
+    custom.append(&apply);
+    plist.append(&custom);
+    pop.set_child(Some(&plist));
+    // Start the spinner at the process's current value.
+    let p = pid.clone();
+    pop.connect_show(move |_| {
+        if let Some(o) = object(p.get()) {
+            spin.set_value(o.row().p.nice as f64);
+        }
+    });
+    (pop, checks)
 }
 
 fn details_panel() -> Details {
@@ -822,10 +972,21 @@ fn details_panel() -> Details {
     let subtitle = widgets::label("", "dim");
     subtitle.add_css_class("mono");
     subtitle.set_ellipsize(pango::EllipsizeMode::End);
+    // "parent N" is a link to the parent process.
+    subtitle.connect_activate_link(|_, uri| {
+        if let Some(pid) = uri.strip_prefix("pid:").and_then(|p| p.parse().ok()) {
+            reveal(pid);
+        }
+        glib::Propagation::Stop
+    });
     text.append(&title);
     text.append(&subtitle);
     head.append(&icon);
     head.append(&text);
+    let collapse = gtk::Button::from_icon_name("pan-down-symbolic");
+    collapse.add_css_class("flat");
+    collapse.set_valign(gtk::Align::Start);
+    head.append(&collapse);
     let hide = gtk::Button::from_icon_name("window-close-symbolic");
     hide.add_css_class("flat");
     hide.set_tooltip_text(Some("Hide details"));
@@ -838,22 +999,41 @@ fn details_panel() -> Details {
     head.append(&hide);
     panel.append(&head);
 
+    let more = widgets::vbox(10);
+    panel.append(&more);
     let (flow, values) =
         widgets::kv_flow(&["CPU", "Memory", "Disk read", "Disk write", "Threads", "Priority", "Open files", "Started"]);
     flow.set_max_children_per_line(8);
-    panel.append(&flow);
+    more.append(&flow);
     let graphs = widgets::hbox(10);
     graphs.set_homogeneous(true);
-    panel.append(&graphs);
+    more.append(&graphs);
     let cmdline = widgets::label("", "code-block");
     cmdline.set_wrap(true);
     cmdline.set_wrap_mode(pango::WrapMode::WordChar);
     cmdline.set_selectable(true);
     cmdline.set_lines(3);
     cmdline.set_ellipsize(pango::EllipsizeMode::End);
-    panel.append(&cmdline);
+    more.append(&cmdline);
 
-    // Actions.
+    let set_compact = {
+        let (more, collapse) = (more.clone(), collapse.clone());
+        move |compact: bool| {
+            more.set_visible(!compact);
+            collapse.set_icon_name(if compact { "pan-up-symbolic" } else { "pan-down-symbolic" });
+            collapse.set_tooltip_text(Some(if compact { "Show more" } else { "Show less" }));
+        }
+    };
+    set_compact(prefs::get().details_compact);
+    collapse.connect_clicked(move |_| {
+        prefs::update(|p| p.details_compact = !p.details_compact);
+        set_compact(prefs::get().details_compact);
+        if let Some(snap) = live::latest() {
+            refresh_details(&snap);
+        }
+    });
+
+    // Actions. Those that signal go to every selected process.
     let buttons = gtk::FlowBox::new();
     buttons.set_selection_mode(gtk::SelectionMode::None);
     buttons.set_row_spacing(6);
@@ -873,42 +1053,12 @@ fn details_panel() -> Details {
             actions::close_window(&o.row().address);
         }
     });
-    let p = pid.clone();
     let pause = gtk::Button::with_label("Pause");
     pause.set_tooltip_text(Some("Freeze the process (SIGSTOP) until you resume it"));
-    pause.connect_clicked(move |_| {
-        if let Some(o) = object(p.get()) {
-            let r = o.row();
-            let sig = if r.p.state == 'T' { Signal::Cont } else { Signal::Stop };
-            actions::signal(&[(r.p.pid, r.p.name.clone())], sig);
-        }
-    });
+    pause.connect_clicked(|_| pause_selected());
     let priority = gtk::MenuButton::new();
     priority.set_label("Priority");
-    let pop = gtk::Popover::new();
-    let plist = widgets::vbox(2);
-    for (label, nice) in [
-        ("Highest (-15)", -15),
-        ("High (-5)", -5),
-        ("Normal (0)", 0),
-        ("Low (5)", 5),
-        ("Lowest (10)", 10),
-        ("Background (19)", 19),
-    ] {
-        let b = gtk::Button::with_label(label);
-        b.add_css_class("flat");
-        let p = pid.clone();
-        let pop2 = pop.clone();
-        b.connect_clicked(move |_| {
-            pop2.popdown();
-            if let Some(o) = object(p.get()) {
-                let r = o.row();
-                actions::renice(r.p.pid, &r.p.name, nice);
-            }
-        });
-        plist.append(&b);
-    }
-    pop.set_child(Some(&plist));
+    let (pop, nice_checks) = priority_popover(&pid);
     priority.set_popover(Some(&pop));
     let p = pid.clone();
     let location = gtk::Button::with_label("Open location");
@@ -920,11 +1070,9 @@ fn details_panel() -> Details {
             actions::copy(&o.row().p.cmdline);
         }
     });
-    let p = pid.clone();
-    let kill = kill_button("Kill", "Click again to kill", Signal::Kill, p);
+    let kill = kill_button("Kill", "Click again to kill", Signal::Kill);
     kill.set_tooltip_text(Some("Stop it immediately (SIGKILL). Unsaved work is lost."));
-    let p = pid.clone();
-    let end = kill_button("End task", "Click again to end", Signal::Term, p);
+    let end = kill_button("End task", "Click again to end", Signal::Term);
     end.set_tooltip_text(Some("Ask it to quit (SIGTERM)"));
     for w in [
         focus.upcast_ref::<gtk::Widget>(),
@@ -943,31 +1091,56 @@ fn details_panel() -> Details {
         c.set_focusable(false);
         child = c.next_sibling();
     }
-    panel.append(&buttons);
+    more.append(&buttons);
 
-    Details { revealer, icon, title, subtitle, values, cmdline, graphs, pid, focus, close, pause, end }
+    Details {
+        revealer,
+        icon,
+        title,
+        subtitle,
+        more,
+        values,
+        cmdline,
+        graphs,
+        pid,
+        focus,
+        close,
+        pause,
+        priority,
+        nice_checks,
+        kill,
+        end,
+    }
 }
 
-/// End/Kill in the details panel: two clicks when "Ask before ending tasks" is on.
-fn kill_button(label: &str, armed: &str, sig: Signal, pid: Rc<Cell<i32>>) -> gtk::Button {
-    let act = move || {
-        if let Some(o) = object(pid.get()) {
-            let r = o.row();
-            actions::signal(&[(r.p.pid, r.p.name.clone())], sig);
-        }
+/// Pause the selection, or resume it when every selected process is already paused.
+fn pause_selected() {
+    let Some(st) = state() else { return };
+    let (t, all_stopped) = {
+        let s = st.borrow();
+        let sel: Vec<ProcObject> = selected(&s).into_iter().filter(|o| !o.row().p.kernel).collect();
+        let all = !sel.is_empty() && sel.iter().all(|o| o.row().p.state == 'T');
+        (targets(&s), all)
     };
-    if prefs::get().confirm_kill {
-        widgets::two_click(label, armed, act)
-    } else {
-        let b = gtk::Button::with_label(label);
-        b.add_css_class("destructive-action");
-        b.connect_clicked(move |_| act());
-        b
+    if !t.is_empty() {
+        actions::signal(&t, if all_stopped { Signal::Cont } else { Signal::Stop });
     }
+}
+
+/// End/Kill in the details panel: two clicks while "Ask before ending tasks" is on.
+fn kill_button(label: &str, armed: &str, sig: Signal) -> gtk::Button {
+    widgets::two_click_if(label, armed, || prefs::get().confirm_kill, move || end_selected(sig))
 }
 
 fn object(pid: i32) -> Option<ProcObject> {
     state().and_then(|s| s.borrow().objects.get(&pid).cloned())
+}
+
+/// Set a button's label unless it's waiting for its confirming click.
+fn relabel(b: &gtk::Button, text: &str) {
+    if !b.has_css_class("armed") && b.label().as_deref() != Some(text) {
+        b.set_label(text);
+    }
 }
 
 fn refresh_details(snap: &Snapshot) {
@@ -987,8 +1160,19 @@ fn refresh_details(snap: &Snapshot) {
         while let Some(c) = d.graphs.first_child() {
             d.graphs.remove(&c);
         }
-        let cpu = graph::sparkline(&format!("proc.{}.cpu", r.p.pid), graph::Tone::Accent, graph::Scale::Auto { floor: 5.0 }, 40);
-        let mem = graph::sparkline(&format!("proc.{}.mem", r.p.pid), graph::Tone::Second, graph::Scale::Auto { floor: 1e6 }, 40);
+        let series = |key: String, tone| vec![graph::Series::new(key, "", tone)];
+        let cpu = graph::sparkline(
+            series(format!("proc.{}.cpu", r.p.pid), graph::Tone::Accent),
+            graph::Scale::Auto { floor: 5.0 },
+            40,
+            fmt::pct,
+        );
+        let mem = graph::sparkline(
+            series(format!("proc.{}.mem", r.p.pid), graph::Tone::Second),
+            graph::Scale::Auto { floor: 1e6 },
+            40,
+            fmt::bytes,
+        );
         for (title, g) in [("CPU", cpu), ("Memory", mem)] {
             let b = widgets::vbox(2);
             b.add_css_class("core-cell");
@@ -1001,7 +1185,27 @@ fn refresh_details(snap: &Snapshot) {
     let name = if r.title.is_empty() { r.p.name.clone() } else { format!("{} — {}", r.p.name, r.title) };
     d.title.set_text(&name);
     let more = if sel.len() > 1 { format!(" · {} selected", sel.len()) } else { String::new() };
-    d.subtitle.set_text(&format!("PID {} · parent {} · {} · {}{more}", r.p.pid, r.p.ppid, r.p.user, state_name(r.p.state)));
+    let compact = !d.more.is_visible();
+    let markup = if compact {
+        // Collapsed: the one line carries the live numbers.
+        format!("PID {} · {} · {}{more}", r.p.pid, fmt::pct(r.cpu()), fmt::bytes(r.mem() as f64))
+    } else {
+        let parent = if s.objects.contains_key(&r.p.ppid) {
+            format!("<a href=\"pid:{0}\" title=\"Show the parent process\">parent {0}</a>", r.p.ppid)
+        } else {
+            format!("parent {}", r.p.ppid)
+        };
+        format!(
+            "PID {} · {parent} · {} · {}{}",
+            r.p.pid,
+            glib::markup_escape_text(&r.p.user),
+            state_name(r.p.state),
+            glib::markup_escape_text(&more)
+        )
+    };
+    if d.subtitle.label() != markup {
+        d.subtitle.set_markup(&markup);
+    }
     let boot = glib::DateTime::now_local().ok().map(|n| n.to_unix() as f64 - snap.cpu.uptime);
     let started = boot
         .and_then(|b| glib::DateTime::from_unix_local((b + r.p.start) as i64).ok())
@@ -1025,14 +1229,304 @@ fn refresh_details(snap: &Snapshot) {
     if d.cmdline.text() != cmd {
         d.cmdline.set_text(&cmd);
     }
-    let has_window = !r.address.is_empty();
+    let has_window = !r.address.is_empty() && sel.len() == 1;
     d.focus.set_visible(has_window);
     d.close.set_visible(has_window);
-    d.pause.set_label(if r.p.state == 'T' { "Resume" } else { "Pause" });
-    d.end.set_sensitive(!r.p.kernel);
+
+    // Signals go to every selected process that isn't a kernel thread.
+    let live_sel: Vec<&ProcObject> = sel.iter().filter(|o| !o.row().p.kernel).collect();
+    let n = live_sel.len();
+    let all_stopped = n > 0 && live_sel.iter().all(|o| o.row().p.state == 'T');
+    let verb = if all_stopped { "Resume" } else { "Pause" };
+    if n > 1 {
+        relabel(&d.pause, &format!("{verb} {n}"));
+        relabel(&d.kill, &format!("Kill {n}"));
+        relabel(&d.end, &format!("End {n} tasks"));
+    } else {
+        relabel(&d.pause, verb);
+        relabel(&d.kill, "Kill");
+        relabel(&d.end, "End task");
+    }
+    for b in [&d.pause, &d.kill, &d.end] {
+        b.set_sensitive(n > 0);
+    }
+    d.priority.set_sensitive(n > 0);
+    // Tick the current priority when the selection shares one.
+    let nice = live_sel.first().map(|o| o.row().p.nice);
+    let shared = nice.filter(|v| live_sel.iter().all(|o| o.row().p.nice == *v));
+    for (value, check) in &d.nice_checks {
+        check.set_opacity(if shared == Some(*value) { 1.0 } else { 0.0 });
+    }
+}
+
+// ---------- Context menu ----------
+
+/// The row widget under a point in the table, as the object it shows.
+fn object_at(cv: &gtk::ColumnView, x: f64, y: f64) -> Option<ProcObject> {
+    let st = state()?;
+    let mut w = cv.pick(x, y, gtk::PickFlags::DEFAULT);
+    while let Some(widget) = w {
+        // Cells are bound by their content widget; climb until one matches.
+        if let Some((obj, _, _)) = st.borrow().bound.get(&key(&widget)) {
+            return Some(obj.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            if let Some((obj, _, _)) = st.borrow().bound.get(&key(&c)) {
+                return Some(obj.clone());
+            }
+            child = c.next_sibling();
+        }
+        if widget == *cv.upcast_ref::<gtk::Widget>() {
+            break;
+        }
+        w = widget.parent();
+    }
+    None
+}
+
+fn position_of(obj: &ProcObject) -> Option<u32> {
+    let st = state()?;
+    let s = st.borrow();
+    (0..s.selection.n_items()).find(|i| s.selection.item(*i).and_downcast::<ProcObject>().as_ref() == Some(obj))
+}
+
+fn context_menu(cv: &gtk::ColumnView) {
+    let group = gio::SimpleActionGroup::new();
+    let add = |name: &str, f: fn()| {
+        let a = gio::SimpleAction::new(name, None);
+        a.connect_activate(move |_, _| f());
+        group.add_action(&a);
+        a
+    };
+    let first = || state().and_then(|s| selected(&s.borrow()).first().cloned());
+    let switch = add("switch", || {
+        if let Some(o) = state().and_then(|s| selected(&s.borrow()).first().cloned()) {
+            actions::focus_window(&o.row().address);
+        }
+    });
+    let close = add("close", || {
+        if let Some(o) = state().and_then(|s| selected(&s.borrow()).first().cloned()) {
+            actions::close_window(&o.row().address);
+        }
+    });
+    let pause = add("pause", pause_selected);
+    let end = add("end", || end_selected(Signal::Term));
+    let kill = add("kill", || end_selected(Signal::Kill));
+    add("tree", || {
+        if let Some(o) = state().and_then(|s| selected(&s.borrow()).first().cloned()) {
+            show_in_tree(o.row().p.pid);
+        }
+    });
+    add("location", || {
+        if let Some(o) = state().and_then(|s| selected(&s.borrow()).first().cloned()) {
+            actions::open_location(o.row().p.pid);
+        }
+    });
+    add("copy", || {
+        if let Some(o) = state().and_then(|s| selected(&s.borrow()).first().cloned()) {
+            actions::copy(&o.row().p.cmdline);
+        }
+    });
+    let priority = gio::SimpleAction::new("priority", Some(glib::VariantTy::INT32));
+    priority.connect_activate(|_, v| {
+        let Some(nice) = v.and_then(|v| v.get::<i32>()) else { return };
+        let t = panel_targets();
+        if !t.is_empty() {
+            actions::renice(&t, nice);
+        }
+    });
+    group.add_action(&priority);
+    cv.insert_action_group("proc", Some(&group));
+
+    let menu = gio::Menu::new();
+    let window = gio::Menu::new();
+    window.append(Some("Switch to"), Some("proc.switch"));
+    window.append(Some("Close window"), Some("proc.close"));
+    menu.append_section(None, &window);
+    let control = gio::Menu::new();
+    control.append(Some("Pause / resume"), Some("proc.pause"));
+    let prio = gio::Menu::new();
+    for (label, nice) in [
+        ("Highest (-15)", -15),
+        ("High (-5)", -5),
+        ("Normal (0)", 0),
+        ("Low (5)", 5),
+        ("Lowest (10)", 10),
+        ("Background (19)", 19),
+    ] {
+        let item = gio::MenuItem::new(Some(label), None);
+        item.set_action_and_target_value(Some("proc.priority"), Some(&nice.to_variant()));
+        prio.append_item(&item);
+    }
+    control.append_submenu(Some("Priority"), &prio);
+    menu.append_section(None, &control);
+    let info = gio::Menu::new();
+    info.append(Some("Show in Tree"), Some("proc.tree"));
+    info.append(Some("Open location"), Some("proc.location"));
+    info.append(Some("Copy command"), Some("proc.copy"));
+    menu.append_section(None, &info);
+    let stop = gio::Menu::new();
+    stop.append(Some("End task"), Some("proc.end"));
+    stop.append(Some("Kill"), Some("proc.kill"));
+    menu.append_section(None, &stop);
+
+    let pop = gtk::PopoverMenu::from_model(Some(&menu));
+    pop.set_parent(cv);
+    pop.set_has_arrow(false);
+    pop.set_halign(gtk::Align::Start);
+    let p2 = pop.clone();
+    cv.connect_destroy(move |_| p2.unparent());
+
+    let click = gtk::GestureClick::new();
+    click.set_button(gdk::BUTTON_SECONDARY);
+    let cv2 = cv.clone();
+    click.connect_pressed(move |g, _, x, y| {
+        let Some(obj) = object_at(&cv2, x, y) else { return };
+        g.set_state(gtk::EventSequenceState::Claimed);
+        if let (Some(pos), Some(st)) = (position_of(&obj), state()) {
+            let sel = st.borrow().selection.clone();
+            if !sel.is_selected(pos) {
+                sel.select_item(pos, true);
+            }
+        }
+        // Only what applies to this selection is offered.
+        let (one, has_window, any_user) = {
+            let Some(st) = state() else { return };
+            let s = st.borrow();
+            let sel = selected(&s);
+            let one = sel.len() == 1;
+            let has_window = one && first().is_some_and(|o| !o.row().address.is_empty());
+            (one, has_window, sel.iter().any(|o| !o.row().p.kernel))
+        };
+        switch.set_enabled(has_window);
+        close.set_enabled(has_window);
+        for a in [&pause, &end, &kill, &priority] {
+            a.set_enabled(any_user);
+        }
+        for name in ["tree", "location", "copy"] {
+            if let Some(a) = group.lookup_action(name).and_downcast::<gio::SimpleAction>() {
+                a.set_enabled(one);
+            }
+        }
+        pop.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        pop.popup();
+    });
+    cv.add_controller(click);
+}
+
+/// Switch to the Tree view with this process selected.
+fn show_in_tree(pid: i32) {
+    let Some(st) = state() else { return };
+    let search = st.borrow().search.clone();
+    st.borrow_mut().query.clear();
+    search.set_text("");
+    // Open the branches down to it.
+    let parents: HashMap<i32, i32> = st.borrow().objects.iter().map(|(p, o)| (*p, o.row().p.ppid)).collect();
+    let path = with_ancestors(&HashSet::from([pid]), &parents);
+    st.borrow_mut().closed.retain(|p| !path.contains(p));
+    st.borrow_mut().pending_reveal = Some(pid);
+    set_view(View::Tree);
+}
+
+// ---------- Saved column layout ----------
+
+thread_local! {
+    static SAVE_COLUMNS: RefCell<Option<glib::SourceId>> = const { RefCell::new(None) };
+}
+
+/// Save column widths and order a moment after the last change (dragging fires a lot).
+fn save_columns_soon() {
+    SAVE_COLUMNS.with(|s| {
+        if let Some(id) = s.borrow_mut().take() {
+            id.remove();
+        }
+        *s.borrow_mut() = Some(glib::timeout_add_local_once(std::time::Duration::from_millis(400), || {
+            SAVE_COLUMNS.with(|s| *s.borrow_mut() = None);
+            let Some(st) = state() else { return };
+            let cv = st.borrow().view_widget.clone();
+            let cols = cv.columns();
+            let mut order = Vec::new();
+            let mut widths = HashMap::new();
+            for i in 0..cols.n_items() {
+                let Some(c) = cols.item(i).and_downcast::<gtk::ColumnViewColumn>() else { continue };
+                let Some(id) = c.id() else { continue };
+                order.push(id.to_string());
+                if c.fixed_width() > 0 && !c.expands() {
+                    widths.insert(id.to_string(), c.fixed_width());
+                }
+            }
+            prefs::update(|p| {
+                p.column_order = order;
+                p.column_widths = widths;
+            });
+        }));
+    });
+}
+
+fn save_sort(st: &State) {
+    let (col, desc) = sort_state(st);
+    let id = COLUMNS.iter().find(|(c, ..)| *c == col).map(|(_, id, ..)| id.to_string()).unwrap_or_default();
+    let p = prefs::get();
+    if p.sort_column != id || p.sort_desc != desc {
+        prefs::update(|p| {
+            p.sort_column = id;
+            p.sort_desc = desc;
+        });
+    }
+}
+
+/// "CPU 23%" and so on: the column titles carry the machine's totals.
+fn update_titles(st: &State, snap: &Snapshot) {
+    let gpu = snap.gpus.iter().filter_map(|g| g.util).fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v))));
+    for (col, c) in &st.columns {
+        let base = COLUMNS.iter().find(|(x, ..)| x == col).map(|(_, _, t, _)| *t).unwrap_or("");
+        let total = match col {
+            Col::Cpu => Some(fmt::pct(snap.cpu.usage)),
+            Col::Mem if snap.mem.total > 0 => Some(fmt::pct(snap.mem.used as f64 / snap.mem.total as f64 * 100.0)),
+            Col::Disk => Some(fmt::rate(snap.disk_read() + snap.disk_write())),
+            Col::Gpu => gpu.map(fmt::pct),
+            _ => None,
+        };
+        let title = match total {
+            Some(t) => format!("{base} {t}"),
+            None => base.to_string(),
+        };
+        if c.title().as_deref() != Some(title.as_str()) {
+            c.set_title(Some(&title));
+        }
+    }
 }
 
 // ---------- Build ----------
+
+/// Wide enough for the details panel to sit beside the table.
+const DOCK_WIDTH: i32 = 1100;
+
+fn set_docked(st: &State, docked: bool) {
+    let Some(d) = &st.details else { return };
+    if st.split.orientation() == gtk::Orientation::Horizontal && docked {
+        return;
+    }
+    if st.split.orientation() == gtk::Orientation::Vertical && !docked {
+        return;
+    }
+    st.split.set_orientation(if docked { gtk::Orientation::Horizontal } else { gtk::Orientation::Vertical });
+    d.revealer.set_transition_type(if docked {
+        gtk::RevealerTransitionType::SlideLeft
+    } else {
+        gtk::RevealerTransitionType::SlideUp
+    });
+    if let Some(panel) = d.revealer.child() {
+        if docked {
+            panel.add_css_class("docked");
+            panel.set_size_request(380, -1);
+        } else {
+            panel.remove_css_class("docked");
+            panel.set_size_request(-1, -1);
+        }
+    }
+}
 
 pub fn build(page: &Page) {
     let p = prefs::get();
@@ -1041,6 +1535,7 @@ pub fn build(page: &Page) {
     // Toolbar: views, filter, columns.
     let toolbar = widgets::hbox(8);
     toolbar.add_css_class("toolbar");
+    toolbar.add_css_class("table-toolbar");
     let chips_box = widgets::hbox(6);
     let mut chips = Vec::new();
     for (v, label, tip) in [
@@ -1089,14 +1584,17 @@ pub fn build(page: &Page) {
     cv.set_hexpand(true);
     cv.set_vexpand(true);
 
+    // Columns in the saved order (any new ones at the end), at their saved widths.
     let hidden = p.hidden_columns.clone();
+    let mut ordered: Vec<&(Col, &str, &str, i32)> = COLUMNS.iter().collect();
+    ordered.sort_by_key(|(_, id, ..)| p.column_order.iter().position(|o| o == id).unwrap_or(usize::MAX));
     let mut columns = Vec::new();
     let colbox = widgets::vbox(2);
     for (col, id, title, width) in COLUMNS {
-        let c = make_column(*col, title, *width);
+        let c = make_column(*col, title, p.column_widths.get(*id).copied().filter(|_| *width > 0).unwrap_or(*width));
         c.set_id(Some(id));
         c.set_visible(!hidden.iter().any(|h| h == id));
-        cv.append_column(&c);
+        c.connect_fixed_width_notify(|_| save_columns_soon());
         if *col != Col::Name {
             let check = gtk::CheckButton::with_label(title);
             check.set_active(c.is_visible());
@@ -1117,14 +1615,27 @@ pub fn build(page: &Page) {
         }
         columns.push((*col, c));
     }
+    for (col, ..) in ordered {
+        if let Some((_, c)) = columns.iter().find(|(x, _)| x == col) {
+            cv.append_column(c);
+        }
+    }
+    cv.columns().connect_items_changed(|_, _, _, _| save_columns_soon());
     let pop = gtk::Popover::new();
     pop.set_child(Some(&colbox));
     columns_menu.set_popover(Some(&pop));
-    if let Some(cpu) = columns.iter().find(|(c, _)| *c == Col::Cpu).map(|(_, c)| c.clone()) {
-        cv.sort_by_column(Some(&cpu), gtk::SortType::Descending);
+    let sort_col = COLUMNS.iter().find(|(_, id, ..)| *id == p.sort_column).map_or(Col::Cpu, |(c, ..)| *c);
+    if let Some(c) = columns.iter().find(|(c, _)| *c == sort_col).map(|(_, c)| c.clone()) {
+        let order = if p.sort_desc || p.sort_column.is_empty() { gtk::SortType::Descending } else { gtk::SortType::Ascending };
+        cv.sort_by_column(Some(&c), order);
     }
     if let Some(cvs) = cv.sorter() {
-        cvs.connect_changed(|_, _| refilter());
+        cvs.connect_changed(|_, _| {
+            if let Some(st) = state() {
+                save_sort(&st.borrow());
+            }
+            refilter();
+        });
     }
 
     let scroll = gtk::ScrolledWindow::builder()
@@ -1138,10 +1649,22 @@ pub fn build(page: &Page) {
     card.set_overflow(gtk::Overflow::Hidden);
     card.append(&scroll);
     card.set_vexpand(true);
-    page.body.append(&card);
+    let empty = widgets::label("", "empty-state");
+    empty.set_valign(gtk::Align::Start);
+    empty.set_wrap(true);
+    let table = gtk::Stack::new();
+    table.set_hexpand(true);
+    table.set_vexpand(true);
+    table.add_named(&card, Some("table"));
+    table.add_named(&empty, Some("empty"));
 
+    // Table and details: stacked, or side by side when there's room.
+    let split = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    split.set_vexpand(true);
+    split.append(&table);
     let details = details_panel();
-    page.body.append(&details.revealer);
+    split.append(&details.revealer);
+    page.body.append(&split);
 
     let my_uid = unsafe { libc::getuid() };
     let st = State {
@@ -1164,6 +1687,9 @@ pub fn build(page: &Page) {
         pending_reveal: None,
         details: Some(details),
         my_uid,
+        table,
+        empty,
+        split,
     };
     STATE.with(|s| *s.borrow_mut() = Some(Rc::new(RefCell::new(st))));
 
@@ -1172,6 +1698,12 @@ pub fn build(page: &Page) {
             st.borrow_mut().query = e.text().to_string();
         }
         refilter();
+    });
+    // Esc in the filter clears it and goes back to the table.
+    let cv2 = cv.clone();
+    search.connect_stop_search(move |e| {
+        e.set_text("");
+        cv2.grab_focus();
     });
     selection.connect_selection_changed(|_, _, _| {
         if let Some(snap) = live::latest() {
@@ -1195,8 +1727,14 @@ pub fn build(page: &Page) {
     let armed: Rc<Cell<Option<(Signal, std::time::Instant)>>> = Rc::new(Cell::new(None));
     let keys = gtk::EventControllerKey::new();
     keys.connect_key_pressed(move |_, key, _, mods| {
-        if key != gdk::Key::Delete && key != gdk::Key::KP_Delete {
-            return glib::Propagation::Proceed;
+        match key {
+            gdk::Key::slash => {
+                focus_search();
+                return glib::Propagation::Stop;
+            }
+            gdk::Key::Left | gdk::Key::Right if mods.is_empty() => return tree_key(key == gdk::Key::Right),
+            gdk::Key::Delete | gdk::Key::KP_Delete => {}
+            _ => return glib::Propagation::Proceed,
         }
         let sig = if mods.contains(gdk::ModifierType::SHIFT_MASK) { Signal::Kill } else { Signal::Term };
         let Some(st) = state() else { return glib::Propagation::Stop };
@@ -1217,7 +1755,61 @@ pub fn build(page: &Page) {
         }
         glib::Propagation::Stop
     });
+    // Ahead of the list's own arrow handling.
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     cv.add_controller(keys);
+    context_menu(&cv);
 
     live::on_tick(&cv, update);
+}
+
+/// Left/Right in Apps and Tree: close or open the selected branch; Left on a
+/// closed or childless row moves to its parent.
+fn tree_key(open: bool) -> glib::Propagation {
+    let Some(st) = state() else { return glib::Propagation::Proceed };
+    let (view, sel) = {
+        let s = st.borrow();
+        (s.view, selected(&s))
+    };
+    if !matches!(view, View::Apps | View::Tree) || sel.len() != 1 {
+        return glib::Propagation::Proceed;
+    }
+    let (pid, ppid, depth, has_children, expanded) = {
+        let r = sel[0].row();
+        (r.p.pid, r.p.ppid, r.depth, r.has_children, r.expanded)
+    };
+    if open {
+        if has_children && !expanded {
+            toggle_expanded(pid);
+        }
+    } else if has_children && expanded {
+        toggle_expanded(pid);
+    } else if depth > 0 {
+        select_pid(ppid);
+    }
+    glib::Propagation::Stop
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adds_ancestors() {
+        // 1 ← 10 ← 100, 1 ← 20; 7 points at itself.
+        let parents = HashMap::from([(10, 1), (100, 10), (20, 1), (1, 0), (7, 7)]);
+        let got = with_ancestors(&HashSet::from([100, 7]), &parents);
+        assert_eq!(got, HashSet::from([100, 10, 1, 0, 7]));
+    }
+
+    #[test]
+    fn grades_heat() {
+        assert_eq!(heat_level(Col::Cpu, 0.5, 0), 0);
+        assert_eq!(heat_level(Col::Cpu, 20.0, 0), 3);
+        assert_eq!(heat_level(Col::Cpu, 99.0, 0), 5);
+        // 1 GiB of 16 GiB is 6.25%: two steps.
+        assert_eq!(heat_level(Col::Mem, (1u64 << 30) as f64, 16 << 30), 2);
+        assert_eq!(heat_level(Col::Mem, 1e9, 0), 0);
+        assert_eq!(heat_level(Col::Pid, 1e9, 0), 0);
+    }
 }

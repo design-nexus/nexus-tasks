@@ -81,6 +81,18 @@ pub fn duration(secs: f64) -> String {
     }
 }
 
+/// A moment relative to `now` (both Unix seconds): "in 3h 2m", "5m 3s ago".
+pub fn relative(when: f64, now: f64) -> String {
+    let d = when - now;
+    if d.abs() < 1.0 {
+        "now".into()
+    } else if d > 0.0 {
+        format!("in {}", duration(d))
+    } else {
+        format!("{} ago", duration(-d))
+    }
+}
+
 /// Hours as "2h 15m".
 pub fn hours(h: f64) -> String {
     duration(h * 3600.0)
@@ -103,6 +115,13 @@ mod tests {
         assert_eq!(duration(59.0), "59s");
         assert_eq!(duration(3700.0), "1h 1m");
         assert_eq!(duration(90000.0), "1d 1h");
+    }
+
+    #[test]
+    fn formats_relative() {
+        assert_eq!(relative(1060.0, 1000.0), "in 1m 0s");
+        assert_eq!(relative(1000.0, 4700.0), "1h 1m ago");
+        assert_eq!(relative(1000.2, 1000.0), "now");
     }
 
     #[test]

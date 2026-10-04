@@ -62,7 +62,10 @@ pub fn build(page: &Page) {
                 graph::graph(vec![Series::new("temp.cpu", "CPU", Tone::Accent)], Scale::Auto { floor: 60.0 }, fmt::temp, 120);
             let (card, summary) = widgets::graph_card("CPU package", &gr.root);
             body.append(&card);
-            live::on_tick(&card, move |s| summary.set_text(&s.sensors.cpu_temp.map(fmt::temp).unwrap_or_default()));
+            live::on_tick(&card, move |s| {
+                summary.set_text(&s.sensors.cpu_temp.map(fmt::temp).unwrap_or_default());
+                widgets::set_warn(&summary, s.sensors.cpu_temp.is_some_and(|t| t >= crate::prefs::get().warn_temp));
+            });
         }
         if snap.sensors.temps.is_empty() {
             body.append(&widgets::row("No temperature sensors", "The kernel exposes no hwmon temperature inputs here.", None));
@@ -102,6 +105,7 @@ pub fn build(page: &Page) {
                 for (chip, label, v, bar) in &cells {
                     if let Some(t) = s.sensors.temps.iter().find(|t| &t.chip == chip && &t.label == label) {
                         v.set_text(&fmt::temp(t.value));
+                        widgets::set_warn(v, t.value >= crate::prefs::get().warn_temp);
                         bar.set_value((t.value / t.high.unwrap_or(100.0)).clamp(0.0, 1.0));
                     }
                 }

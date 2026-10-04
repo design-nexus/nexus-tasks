@@ -109,7 +109,7 @@ pub fn all() -> Vec<Section> {
             keywords: "wifi ethernet download upload bandwidth ip address traffic",
             files: Vec::new,
             build: network::build,
-            readout: None,
+            readout: Some(|s| format!("↓ {}", crate::fmt::net_rate(s.net_rx()))),
             fill: false,
         },
         Section {

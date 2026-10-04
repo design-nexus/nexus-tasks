@@ -37,6 +37,8 @@ fn mount_row(path: &str) -> (gtk::Box, gtk::LevelBar, gtk::Label) {
     head.append(&open);
     row.append(&head);
     let bar = widgets::usage_bar();
+    // Coloured by the "disk full" warning setting instead of the bar's own 90%.
+    bar.add_offset_value("ok", 1.0);
     row.append(&bar);
     (row, bar, detail)
 }
@@ -119,7 +121,9 @@ fn disk_section(body: &gtk::Box, d: &Disk) {
             if let Some(m) = d.mounts.iter().find(|m| &m.path == path)
                 && m.total > 0
             {
-                bar.set_value(m.used() as f64 / m.total as f64);
+                let full = m.used() as f64 / m.total as f64;
+                bar.set_value(full);
+                widgets::warn_bar(bar, full * 100.0 >= crate::prefs::get().warn_disk);
                 detail.set_text(&format!("{} free of {}", fmt::bytes(m.free as f64), fmt::bytes(m.total as f64)));
             }
         }

@@ -82,20 +82,35 @@ pub fn signal(targets: &[(i32, String)], sig: Signal) {
     live::poke();
 }
 
-/// Change a process's niceness (-20 … 19). Lowering it below the current value
-/// needs administrator rights, which we ask for through `pkexec`.
-pub fn renice(pid: i32, name: &str, nice: i32) {
-    let r = unsafe { libc::setpriority(libc::PRIO_PROCESS, pid as libc::id_t, nice) };
-    if r == 0 {
-        window::toast(&format!("{name} now runs at priority {nice}"));
-        live::poke();
+/// Change the niceness (-20 … 19) of each pid. Raising priority past what we
+/// may set is retried through `pkexec` (one password prompt for the lot).
+pub fn renice(targets: &[(i32, String)], nice: i32) {
+    let mut denied: Vec<i32> = Vec::new();
+    let mut ok = 0;
+    for (pid, _) in targets {
+        if unsafe { libc::setpriority(libc::PRIO_PROCESS, *pid as libc::id_t, nice) } == 0 {
+            ok += 1;
+        } else if errno() != libc::ESRCH {
+            denied.push(*pid);
+        }
+    }
+    let what = |n: usize| if targets.len() == 1 { targets[0].1.clone() } else { format!("{n} processes") };
+    if ok > 0 {
+        window::toast(&format!("{} now run{} at priority {nice}", what(ok), if targets.len() == 1 { "s" } else { "" }));
+    }
+    live::poke();
+    if denied.is_empty() {
         return;
     }
-    let name = name.to_string();
-    let (n, p) = (nice.to_string(), pid.to_string());
-    cmd::run_async(&["pkexec", "renice", "-n", &n, "-p", &p], move |r| match r {
+    let mut args: Vec<String> = vec!["pkexec".into(), "renice".into(), "-n".into(), nice.to_string(), "-p".into()];
+    args.extend(denied.iter().map(|p| p.to_string()));
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let n = denied.len();
+    let label = what(n);
+    let single = targets.len() == 1;
+    cmd::run_async(&refs, move |r| match r {
         Ok(_) => {
-            window::toast(&format!("{name} now runs at priority {nice}"));
+            window::toast(&format!("{label} now run{} at priority {nice}", if single { "s" } else { "" }));
             live::poke();
         }
         Err(_) => window::toast("Priority not changed"),
@@ -135,4 +150,18 @@ pub fn copy(text: &str) {
         gtk::prelude::DisplayExt::clipboard(&display).set_text(text);
         window::toast("Copied");
     }
+}
+
+/// Ask where to save graph history, then write it there as CSV.
+pub fn export_csv(name: &str, keys: Option<Vec<String>>) {
+    let text = live::csv(keys.as_deref());
+    let dialog = gtk::FileDialog::builder().title("Export graph history").initial_name(format!("{name}.csv")).modal(true).build();
+    dialog.save(window::window().as_ref(), None::<&gtk::gio::Cancellable>, move |res| {
+        let Ok(file) = res else { return };
+        let Some(path) = gtk::prelude::FileExt::path(&file) else { return };
+        match std::fs::write(&path, text) {
+            Ok(()) => window::toast(&format!("Saved {}", crate::paths::pretty(&path))),
+            Err(e) => window::toast(&format!("Couldn't save: {e}")),
+        }
+    });
 }

@@ -107,8 +107,7 @@ fn app_name(command: &str) -> (String, String) {
 pub fn build(page: &Page) {
     let holder = widgets::vbox(0);
     page.body.append(&holder);
-    let loading = widgets::label("Reading startup items…", "dim");
-    loading.set_margin_top(24);
+    let loading = widgets::loading("Reading startup items…");
     holder.append(&loading);
     cmd::background(load, move |d| {
         holder.remove(&loading);

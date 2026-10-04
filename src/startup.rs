@@ -332,7 +332,7 @@ pub fn unescape(s: &str) -> String {
 
 // ---------- systemd ----------
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Unit {
     pub name: String,
     pub description: String,
@@ -374,7 +374,7 @@ pub fn parse_units(units_json: &str, files_json: &str) -> Vec<Unit> {
     for f in parse(files_json) {
         let Some(name) = f["unit_file"].as_str() else { continue };
         // Templates (foo@.service) can't run by themselves.
-        if name.ends_with("@.service") {
+        if name.ends_with("@.service") || name.ends_with("@.timer") {
             continue;
         }
         let e = map.entry(name.to_string()).or_insert_with(|| Unit {
@@ -397,6 +397,61 @@ pub fn units(user: bool) -> Vec<Unit> {
     let files =
         cmd::output(&["systemctl", scope, "list-unit-files", "--type=service", "-o", "json", "--no-pager"]).unwrap_or_default();
     parse_units(&units, &files)
+}
+
+/// A systemd timer: its own unit state, plus when it fires.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Timer {
+    pub unit: Unit,
+    /// The unit it starts.
+    pub activates: String,
+    /// Next and last run, as Unix seconds.
+    pub next: Option<f64>,
+    pub last: Option<f64>,
+}
+
+/// `systemctl list-timers -o json` merged into the timer units.
+pub fn parse_timers(timers_json: &str, units: Vec<Unit>) -> Vec<Timer> {
+    let list = serde_json::from_str::<Vec<serde_json::Value>>(timers_json).unwrap_or_default();
+    // Microseconds since the epoch; 0 or null means never.
+    let when = |v: &serde_json::Value| v.as_f64().filter(|t| *t > 0.0).map(|t| t / 1e6);
+    let info: HashMap<&str, &serde_json::Value> = list.iter().filter_map(|t| Some((t["unit"].as_str()?, t))).collect();
+    units
+        .into_iter()
+        .map(|unit| {
+            let t = info.get(unit.name.as_str());
+            Timer {
+                activates: t
+                    .and_then(|t| t["activates"].as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| unit.name.trim_end_matches(".timer").to_string() + ".service"),
+                next: t.and_then(|t| when(&t["next"])),
+                last: t.and_then(|t| when(&t["last"])),
+                unit,
+            }
+        })
+        .collect()
+}
+
+pub fn timers(user: bool) -> Vec<Timer> {
+    let scope = if user { "--user" } else { "--system" };
+    let run = |args: &[&str]| {
+        cmd::output(&[&["systemctl", scope][..], args, &["-o", "json", "--no-pager"]].concat()).unwrap_or_default()
+    };
+    let units = parse_units(&run(&["list-units", "--type=timer", "--all"]), &run(&["list-unit-files", "--type=timer"]));
+    parse_timers(&run(&["list-timers", "--all"]), units)
+}
+
+/// `systemctl show -p …` as key/value pairs.
+pub fn unit_props(unit: &str, user: bool) -> HashMap<String, String> {
+    let scope = if user { "--user" } else { "--system" };
+    let props = "MainPID,MemoryCurrent,CPUUsageNSec,ActiveEnterTimestamp,FragmentPath,Restart,ExecStart,ActiveState,SubState";
+    let text = cmd::output(&["systemctl", scope, "show", unit, "-p", props, "--no-pager"]).unwrap_or_default();
+    parse_props(&text)
+}
+
+pub fn parse_props(text: &str) -> HashMap<String, String> {
+    text.lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect()
 }
 
 /// `systemd-analyze blame` as seconds per unit.
@@ -496,6 +551,29 @@ o.exec_on_start('say "hi"')
     fn unescapes_units() {
         assert_eq!(unescape("app-gnome\\x2dkeyring@autostart.service"), "app-gnome-keyring@autostart.service");
         assert_eq!(unescape("plain"), "plain");
+    }
+
+    #[test]
+    fn parses_timers() {
+        let units = vec![
+            Unit { name: "backup.timer".into(), active: "active".into(), ..Default::default() },
+            Unit { name: "idle.timer".into(), ..Default::default() },
+        ];
+        let json = r#"[{"next":1791176995184497,"left":1,"last":null,"passed":0,"unit":"backup.timer","activates":"backup-run.service"}]"#;
+        let t = parse_timers(json, units);
+        assert_eq!(t[0].activates, "backup-run.service");
+        assert!((t[0].next.unwrap() - 1_791_176_995.184497).abs() < 1e-3);
+        assert_eq!(t[0].last, None);
+        // Not listed by list-timers: guessed from its name, never runs.
+        assert_eq!(t[1].activates, "idle.service");
+        assert_eq!(t[1].next, None);
+    }
+
+    #[test]
+    fn parses_props() {
+        let p = parse_props("MainPID=42\nExecStart={ path=/usr/bin/x ; argv[]=/usr/bin/x -a }\nRestart=no\n");
+        assert_eq!(p["MainPID"], "42");
+        assert_eq!(p["ExecStart"], "{ path=/usr/bin/x ; argv[]=/usr/bin/x -a }");
     }
 
     #[test]

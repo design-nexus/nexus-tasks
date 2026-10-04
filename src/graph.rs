@@ -131,24 +131,111 @@ fn draw_lines(cr: &cairo::Context, w: f64, h: f64, cap: usize, data: &[(Vec<f64>
     }
 }
 
-/// A small graph with no chrome, for tiles and per-core grids.
-pub fn sparkline(key: &str, tone: Tone, scale: Scale, height: i32) -> gtk::DrawingArea {
-    sparkline_multi(vec![Series::new(key, "", tone)], scale, height)
+/// Where the pointer sits in the history: samples back from now, and that sample's x.
+fn hover_sample(w: f64, hx: f64, cap: usize) -> (usize, f64) {
+    let step = w / (cap.max(2) - 1) as f64;
+    let back = ((w - hx) / step).round().max(0.0) as usize;
+    (back, w - back as f64 * step)
 }
 
-pub fn sparkline_multi(series: Vec<Series>, scale: Scale, height: i32) -> gtk::DrawingArea {
+/// The hover readout: one line per series (marked solid or dashed when there
+/// are several), then how long ago. None when there's no data that far back.
+fn hover_lines(series: &[Series], raw: &[Vec<f64>], back: usize, fmt: fn(f64) -> String) -> Option<String> {
+    let mut lines = Vec::new();
+    for (s, values) in series.iter().zip(raw) {
+        if back >= values.len() {
+            continue;
+        }
+        let v = fmt(values[values.len() - 1 - back]);
+        lines.push(if series.len() == 1 {
+            v
+        } else {
+            let mark = if s.dashed { "┅" } else { "━" };
+            format!("{mark} {}  {v}", s.label)
+        });
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let secs = back as f64 * prefs::get().interval_ms as f64 / 1000.0;
+    lines.push(if back == 0 { "now".into() } else { format!("{} ago", crate::fmt::duration(secs)) });
+    Some(lines.join("\n"))
+}
+
+/// The hover crosshair and a dot on each line.
+fn draw_hover(cr: &cairo::Context, w: f64, h: f64, hx: f64, data: &[(Vec<f64>, Tone, bool)], max: f64, dot: f64) {
+    let p = theme::palette();
+    let (back, x) = hover_sample(w, hx, live::capacity());
+    cr.move_to(x.round() + 0.5, 0.0);
+    cr.line_to(x.round() + 0.5, h);
+    set(cr, Rgb::hex(&p.text), 0.3);
+    let _ = cr.stroke();
+    for (values, tone, _) in data {
+        if back >= values.len() {
+            continue;
+        }
+        let v = values[values.len() - 1 - back];
+        let y = (h - 1.0) - (v / max).clamp(0.0, 1.0) * (h - 3.0);
+        cr.arc(x, y, dot + 1.5, 0.0, std::f64::consts::TAU);
+        set(cr, Rgb::hex(&p.bg), 1.0);
+        let _ = cr.fill();
+        cr.arc(x, y, dot, 0.0, std::f64::consts::TAU);
+        set(cr, tone.rgb(), 1.0);
+        let _ = cr.fill();
+    }
+}
+
+/// A small graph with no chrome, for tiles and per-core grids. Hovering shows
+/// a crosshair, and the value (through `fmt`) as a tooltip.
+pub fn sparkline(series: Vec<Series>, scale: Scale, height: i32, fmt: fn(f64) -> String) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_content_height(height);
     area.set_hexpand(true);
     area.add_css_class("sparkline");
-    area.set_draw_func(move |_, cr, w, h| {
-        let data: Vec<(Vec<f64>, Tone, bool)> = series.iter().map(|s| (live::history(&s.key), s.tone, s.dashed)).collect();
-        let values: Vec<Vec<f64>> = data.iter().map(|d| d.0.clone()).collect();
-        let max = scale_max(scale, &values);
-        draw_lines(cr, w as f64, h as f64, live::capacity(), &data, max, 1.5);
+    let series = Rc::new(series);
+    let hover: Rc<Cell<Option<f64>>> = Rc::new(Cell::new(None));
+    {
+        let (series, hover) = (series.clone(), hover.clone());
+        area.set_draw_func(move |_, cr, w, h| {
+            let data: Vec<(Vec<f64>, Tone, bool)> = series.iter().map(|s| (live::history(&s.key), s.tone, s.dashed)).collect();
+            let values: Vec<Vec<f64>> = data.iter().map(|d| d.0.clone()).collect();
+            let max = scale_max(scale, &values);
+            draw_lines(cr, w as f64, h as f64, live::capacity(), &data, max, 1.5);
+            if let Some(hx) = hover.get() {
+                draw_hover(cr, w as f64, h as f64, hx, &data, max, 2.5);
+            }
+        });
+    }
+    let tip: Rc<dyn Fn()> = {
+        let (series, hover, area) = (series.clone(), hover.clone(), area.clone());
+        Rc::new(move || {
+            let text = hover.get().filter(|_| area.width() > 0).and_then(|hx| {
+                let raw: Vec<Vec<f64>> = series.iter().map(|s| live::history(&s.key)).collect();
+                let (back, _) = hover_sample(area.width() as f64, hx, live::capacity());
+                hover_lines(&series, &raw, back, fmt)
+            });
+            area.set_tooltip_text(text.as_deref());
+        })
+    };
+    let motion = gtk::EventControllerMotion::new();
+    let (h2, a2, t2) = (hover.clone(), area.clone(), tip.clone());
+    motion.connect_motion(move |_, x, _| {
+        h2.set(Some(x));
+        t2();
+        a2.queue_draw();
     });
+    let (h2, a2, t2) = (hover.clone(), area.clone(), tip.clone());
+    motion.connect_leave(move |_| {
+        h2.set(None);
+        t2();
+        a2.queue_draw();
+    });
+    area.add_controller(motion);
     let a = area.clone();
-    live::on_tick(&area, move |_| a.queue_draw());
+    live::on_tick(&area, move |_| {
+        tip();
+        a.queue_draw();
+    });
     area
 }
 
@@ -239,24 +326,12 @@ pub fn graph(series: Vec<Series>, scale: Scale, fmt: fn(f64) -> String, height: 
                 tip.set_visible(false);
                 return;
             };
-            let step = w / (cap.max(2) - 1) as f64;
-            let back = ((w - hx) / step).round().max(0.0) as usize;
-            let x = w - back as f64 * step;
-            let mut lines = Vec::new();
-            for (s, values) in series.iter().zip(&raw) {
-                if back >= values.len() {
-                    continue;
-                }
-                let v = values[values.len() - 1 - back];
-                lines.push(if series.len() == 1 { fmt(v) } else { format!("{}  {}", s.label, fmt(v)) });
-            }
-            if lines.is_empty() {
+            let (back, x) = hover_sample(w, hx, cap);
+            let Some(text) = hover_lines(&series, &raw, back, fmt) else {
                 tip.set_visible(false);
                 return;
-            }
-            let secs = back as f64 * prefs::get().interval_ms as f64 / 1000.0;
-            lines.push(if back == 0 { "now".into() } else { format!("{} ago", crate::fmt::duration(secs)) });
-            tip.set_text(&lines.join("\n"));
+            };
+            tip.set_text(&text);
             tip.set_visible(true);
             let tw = tip.width().max(90) as f64;
             let left = if x + 12.0 + tw > w { x - 12.0 - tw } else { x + 12.0 };
@@ -291,26 +366,8 @@ pub fn graph(series: Vec<Series>, scale: Scale, fmt: fn(f64) -> String, height: 
             let cap = live::capacity();
             draw_lines(cr, w, h, cap, &data, max, 2.0);
 
-            let Some(hx) = hover.get() else { return };
-            let step = w / (cap.max(2) - 1) as f64;
-            let back = ((w - hx) / step).round().max(0.0) as usize;
-            let x = w - back as f64 * step;
-            cr.move_to(x.round() + 0.5, 0.0);
-            cr.line_to(x.round() + 0.5, h);
-            set(cr, Rgb::hex(&p.text), 0.3);
-            let _ = cr.stroke();
-            for (values, tone, _) in &data {
-                if back >= values.len() {
-                    continue;
-                }
-                let v = values[values.len() - 1 - back];
-                let y = (h - 1.0) - (v / max).clamp(0.0, 1.0) * (h - 3.0);
-                cr.arc(x, y, 4.5, 0.0, std::f64::consts::TAU);
-                set(cr, Rgb::hex(&p.bg), 1.0);
-                let _ = cr.fill();
-                cr.arc(x, y, 3.0, 0.0, std::f64::consts::TAU);
-                set(cr, tone.rgb(), 1.0);
-                let _ = cr.fill();
+            if let Some(hx) = hover.get() {
+                draw_hover(cr, w, h, hx, &data, max, 3.0);
             }
         });
     }
@@ -336,6 +393,32 @@ pub fn graph(series: Vec<Series>, scale: Scale, fmt: fn(f64) -> String, height: 
         });
     }
     area.add_controller(motion);
+
+    // Right-click: save what this graph shows.
+    let menu = gtk::Popover::new();
+    menu.set_has_arrow(false);
+    let export = gtk::Button::with_label("Export this graph (CSV)");
+    export.add_css_class("flat");
+    menu.set_child(Some(&export));
+    menu.set_parent(&area);
+    let m2 = menu.clone();
+    area.connect_destroy(move |_| m2.unparent());
+    {
+        let (series, menu) = (series.clone(), menu.clone());
+        export.connect_clicked(move |_| {
+            menu.popdown();
+            let keys: Vec<String> = series.iter().map(|s| s.key.clone()).collect();
+            let name = keys.first().map_or("graph".to_string(), |k| k.replace('.', "-"));
+            crate::actions::export_csv(&name, Some(keys));
+        });
+    }
+    let click = gtk::GestureClick::new();
+    click.set_button(gtk::gdk::BUTTON_SECONDARY);
+    click.connect_pressed(move |_, _, x, y| {
+        menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        menu.popup();
+    });
+    area.add_controller(click);
 
     {
         let a = area.clone();
