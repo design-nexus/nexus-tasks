@@ -256,7 +256,23 @@ fn build(app: &gtk::Application) {
     window.connect_default_width_notify(move |w| aw(w));
     let aw = apply_width.clone();
     window.connect_realize(move |w| aw(w));
-    // Tiled windows are resized by the compositor; watch the real size too.
+    // Tiled windows are resized by the compositor without touching the default
+    // size: an invisible layer over the whole window reports each real size
+    // change, and the layout follows on the next frame.
+    let probe = gtk::DrawingArea::new();
+    probe.set_can_target(false);
+    probe.set_can_focus(false);
+    overlay.add_overlay(&probe);
+    overlay.set_measure_overlay(&probe, false);
+    {
+        let (aw, w2) = (apply_width.clone(), window.clone());
+        probe.connect_resize(move |_, _, _| {
+            let (aw, w2) = (aw.clone(), w2.clone());
+            // After this layout pass, when the window's width is the new one.
+            glib::idle_add_local_once(move || aw(&w2));
+        });
+    }
+    // A slow fallback, in case a resize slips by.
     let w2 = window.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(400), move || {
         apply_width(&w2);
